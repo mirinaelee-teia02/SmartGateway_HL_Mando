@@ -1,0 +1,112 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "cmake",
+      "label": "CMake: build",
+      "command": "build",
+      "preset": "debug",
+      "targets": [
+        "all"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "CMake template build task"
+    },
+    {
+      "type": "cmake",
+      "label": "CMake: clean",
+      "command": "clean",
+      "preset": "debug",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "CMake template clean task"
+    },
+    {
+      "type": "cmake",
+      "label": "CMake: configure",
+      "command": "configure",
+      "preset": "debug",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "CMake template configure task"
+    },
+    {
+      "type": "cmake",
+      "label": "CMake: build",
+      "command": "build",
+      "targets": [
+        "all"
+      ],
+      "preset": "debug",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "CMake template build task"
+    },
+    {
+      "label": "Where is LinkServer? (경로 확인)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-Command",
+        "$r = Get-ChildItem -Path \"$env:USERPROFILE\\.mcuxpressotools\" -Filter LinkServer.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 5 FullName; if ($r) { $r } else { Write-Host 'NOT FOUND under .mcuxpressotools — install LinkServer via MCUXpresso Installer' }"
+      ],
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "Error 103 시 먼저 실행: LinkServer.exe 위치 확인"
+    },
+    {
+      "label": "Build SmartGateway (west)",
+      "type": "shell",
+      "command": "west",
+      "args": [
+        "build",
+        "-b",
+        "frdm_mcxn947/mcxn947/cpu0",
+        "-d",
+        "debug",
+        "-p",
+        "auto"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "Cursor/VS Code에서 폴더를 SmartGateway로 연 뒤 실행. 터미널에 ZEPHYR_BASE 설정됐는지 확인."
+    },
+    {
+      "label": "Build SmartGateway (ninja)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/debug"
+      ],
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "detail": "ninja build (빌드 디렉터리가 이미 구성된 경우)"
+    }
+  ]
+}

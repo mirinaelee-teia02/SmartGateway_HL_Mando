@@ -1,0 +1,88 @@
+/*
+ * SmartGateway — FRDM-MCXN947 + EVK-MAYA-W166 (u-blox IW416)
+ *
+ * WiFi 연결: FRDM-MCXN947 microSD 슬롯(USDHC0) → microSD 어댑터
+ *   → EVK-MAYA-W166 J3 ZIF FPC
+ *   SDIO 핀만 연결: CLK, CMD, D0~D3 + VBUS_SDIO(3.3V)
+ *   GPIO 없음: PDn은 EVK 내부 풀업으로 HIGH (정상동작)
+ *
+ * UART0(FC4): MikroBUS FC4 — P1_8=RX, P1_9=TX (콘솔 or RS-232 포트0)
+ * UART1(FC5): MikroBUS J5  — P1_16=RX, P1_17=TX (RS-232 포트1)
+ * ADC       : 내부 LPADC0 2ch (CH1A/CH2A, 0~1.8V) — 검증 모드
+ * [AD7327]  : LPSPI6(FC6) — 아래 주석 블록 참조, 추후 활성화
+ */
+
+/* cpu1 미사용: SRAM0-7 전체(416KB)를 cpu0 에 할당 */
+&sram0 {
+	reg = <0x20000000 DT_SIZE_K(416)>;
+};
+
+/* ── 내부 LPADC0 (검증용) — 채널 설정은 adc.c에서 adc_channel_setup()으로 처리 ── */
+&lpadc0 {
+	status = "okay";
+};
+
+/* ── UART0: flexcomm4 (P1_8/P1_9, 콘솔 or RS-232 포트0) ── */
+&flexcomm4 {
+	status = "okay";
+};
+
+&flexcomm4_lpuart4 {
+	status = "okay";
+};
+
+/* ── UART1: flexcomm5 (P1_16/P1_17, RS-232 포트1) ── */
+&pinctrl {
+	pinmux_smartgateway_rs232_mikrobus: pinmux_smartgateway_rs232_mikrobus {
+		group0 {
+			pinmux = <0x14000200 0x14400200>;
+			slew-rate = "fast";
+			drive-strength = "low";
+			input-enable;
+			bias-pull-up;
+		};
+	};
+};
+
+&i3c1 {
+	status = "disabled";
+};
+
+&flexcomm5 {
+	status = "okay";
+};
+
+&flexcomm5_lpuart5 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&pinmux_smartgateway_rs232_mikrobus>;
+	pinctrl-names = "default";
+};
+
+&dac0 {
+	status = "disabled";
+};
+
+/* ── [AD7327 disabled] SPI ADC: LPSPI6 (FlexComm6, MikroBUS SPI) ──
+ * &flexcomm6_lpspi6 {
+ *     status = "okay";
+ *     ad7327: ad7327@0 {
+ *         compatible = "vnd,spi-device";
+ *         reg = <0>;
+ *         spi-max-frequency = <10000000>;
+ *     };
+ * };
+ * ────────────────────────────────────────────────────────────── */
+
+/* ── USDHC0 — SDIO (EVK-MAYA-W166 IW416 WiFi) ── */
+&usdhc0 {
+	status = "okay";
+	/delete-property/ cd-gpios;
+	max-bus-freq = <1000000>;
+	/delete-node/ sdmmc;
+
+	nxp_wifi: nxp-wifi {
+		compatible = "nxp,wifi";
+		/* GPIO 없음 — SDIO 전용, PDn은 EVK 내부 풀업 */
+	};
+};

@@ -1,0 +1,9 @@
+# SmartGateway — CONNECT(0x80) Body 덮어쓰기 (SD 카드 FAT 루트 등에 복사)
+# prj.conf 는 펌웨어 빌드 시에만 반영됩니다. 이 파일은 CONFIG_SMARTGATEWAY_TCP_CONNECT_CFG_FILE=y 일 때
+# 부팅·TCP 세션 시작 시 읽어 Kconfig 기본값을 덮어씁니다.
+#
+# 한 줄에 하나, # 로 시작하면 주석. 키는 대소문자 무시.
+# version_hex 는 연속 16진 문자열(짝수 자리), master 는 ASCII 문자열.
+
+master=KRWJARDU001
+version_hex=020000

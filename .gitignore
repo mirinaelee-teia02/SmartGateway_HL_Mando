@@ -1,0 +1,22 @@
+# 빌드 출력
+debug/
+build/
+build_check/
+build_verify/
+
+# 로그 / 임시
+*.log
+*.zip
+ninja_out.txt
+full_build.log
+
+# MCUXpresso 자동 생성
+mcux_include.json
+svd/
+__repo__
+
+# CMake 캐시 (preset은 유지)
+CMakeFiles/
+cmake_install.cmake
+SmartGateway_HLMando/
+.claude/

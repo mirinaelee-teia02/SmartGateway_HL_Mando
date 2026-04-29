@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"name": "SmartGateway",
+			"path": ".."
+		}
+	],
+	"settings": {
+		"cmake.ignoreCMakeListsMissing": true,
+		"cmake.configureOnOpen": false,
+		"cmake.enableAutomaticKitScan": false,
+		"cmake.sourceDirectory": "${workspaceFolder}/nonexistent"
+	}
+}

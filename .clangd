@@ -1,0 +1,6 @@
+CompileFlags:
+  CompilationDatabase: debug
+  Remove:
+    - -fno-printf-return-value
+    - -mfp16-format=ieee
+    - -fno-reorder-functions

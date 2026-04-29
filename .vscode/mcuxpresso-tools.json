@@ -1,0 +1,13 @@
+{
+  "version": "25.3",
+  "toolchainPath": "${userHome}/zephyr-sdk-0.17.4/arm-zephyr-eabi",
+  "linkedProjects": [],
+  "trustZoneType": "none",
+  "multicoreType": "none",
+  "projectType": "zephyr-freestanding",
+  "projectName": "SmartGateway",
+  "sdk": {
+    "path": "c:\\nxp\\Zephyr\\nxp_zephyr",
+    "version": "4.3.0"
+  }
+}
