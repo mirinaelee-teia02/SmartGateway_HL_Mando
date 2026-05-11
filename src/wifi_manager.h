@@ -1,21 +1,19 @@
 /*
- * SmartGateway — WiFi Task
+ * SmartGateway — WiFi (NVS + netmgr)
  */
 #ifndef WIFI_MANAGER_H_
 #define WIFI_MANAGER_H_
 
-/**
- * WiFi 태스크를 시작합니다.
- * AP 연결 → DHCP → 완료 순으로 진행됩니다.
- * @return 0 성공, 음수 실패
- */
-int wifi_task_start(void);
+#include <stdbool.h>
 
-/**
- * WiFi 준비 완료(AP 연결 + IP 설정)까지 블록.
- * @param timeout_ms 최대 대기 시간 (ms)
- * @return 0 성공, -EAGAIN 타임아웃
- */
+/** 레거시: 단일 태스크로 연결 → wifi_wait_ready 로 완료 대기 */
+int wifi_task_start(void);
 int wifi_wait_ready(int timeout_ms);
+
+/** 분할 부팅(network_manager): 동기 한 번 연결·정적 IP */
+int wifi_mgr_init(void);
+int wifi_connect_once(int timeout_ms);
+bool wifi_is_ready(void);
+void wifi_force_disconnect(void);
 
 #endif /* WIFI_MANAGER_H_ */

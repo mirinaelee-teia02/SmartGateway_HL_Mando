@@ -1,0 +1,8 @@
+/*
+ * 이더넷 단독 검증: USDHC0(SDMAY IW416 SDIO) 비활성 → WiFi 펌웨어·SDIO 로그 제거, RAM 절약
+ * CMake: -DSMARTGATEWAY_ETH_ONLY_TEST=ON
+ */
+
+&usdhc0 {
+	status = "disabled";
+};

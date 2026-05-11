@@ -11,6 +11,34 @@ config SMARTGATEWAY_LINE_ID
 	  line·DeviveID 필드에 쓰입니다. 50자 초과는 잘립니다(NUL 종료).
 	  prj.conf 예: CONFIG_SMARTGATEWAY_LINE_ID="이름"
 
+comment "── NVS 분할 부팅 (net_boot_mode) ───────────────"
+
+config SMARTGATEWAY_NET_BOOT_DEFAULT
+	int "NVS 기본 네트워크 모드 (0=WiFi 1=이더넷)"
+	default 0
+	range 0 1
+	help
+	  스키마 초기화 후 또는 load_defaults 시 NVS에 쓰이는 초기값.
+	  0=WiFi: 유선 내리고 WiFi만 시도. 전부 실패 시 NVS를 1로 바꾸고 냉 재부팅.
+	  1=이더넷: WiFi 단계 없음.
+	  WiFi 비활성 빌드에서는 항상 이더넷(1)으로 고정된다.
+
+config SMARTGATEWAY_FORCE_ETH_BOOT_MODE
+	bool "부팅 시 NVS net_boot_mode를 이더넷(1)로 저장"
+	default n
+	help
+	  한 번 플래시 후 재부팅하면 NVS가 유선 우선 모드로 덮어써진다.
+	  FORCE_WIFI_BOOT_MODE 와 동시에 사용할 수 없음(menuconfig 가 배타 처리).
+
+config SMARTGATEWAY_FORCE_WIFI_BOOT_MODE
+	bool "부팅 시 NVS net_boot_mode를 WiFi(0)로 저장"
+	default n
+	depends on SMARTGATEWAY_WIFI_ENABLE
+	depends on !SMARTGATEWAY_FORCE_ETH_BOOT_MODE
+	help
+	  한 번 빌드·플래시 후 재부팅하면 NVS의 분할 부팅 모드가 WiFi로 덮어써진다.
+	  WiFi 테스트 후에는 이 옵션을 끄고 다시 빌드하면 된다.
+
 comment "── 이더넷 UDP ──────────────────────────────────"
 
 config SMARTGATEWAY_ETH_UDP_PEER_IP
@@ -29,6 +57,31 @@ config SMARTGATEWAY_ETH_UDP_BIND_PORT
 	int "이더넷 UDP 수신 바인드 포트 (0이면 recv 안 함)"
 	default 0
 	range 0 65535
+
+comment "── 이더넷 보드 IP·TCP 상대 (netmgr / NVS 기본값) ──"
+
+config SMARTGATEWAY_ETH_STATIC_IP
+	string "이더넷 인터페이스 정적 IPv4 (보드)"
+	default "10.108.214.150"
+
+config SMARTGATEWAY_ETH_STATIC_NETMASK
+	string "이더넷 서브넷 마스크"
+	default "255.255.255.0"
+
+config SMARTGATEWAY_ETH_STATIC_GW
+	string "이더넷 기본 게이트웨이"
+	default "10.108.214.1"
+
+config SMARTGATEWAY_ETH_TCP_PEER_IP
+	string "이더넷 TCP 상대(서버) IPv4"
+	default "10.108.214.100"
+	help
+	  NVS의 eth_tcp_server_ip 기본값. TCP Modbus 게이트가 listen 할 때 상대 PC 주소.
+
+config SMARTGATEWAY_ETH_TCP_PEER_PORT
+	int "이더넷 TCP 상대 포트"
+	default 20273
+	range 1 65535
 
 comment "── WiFi UDP ─────────────────────────────────────"
 
@@ -173,7 +226,7 @@ config SMARTGATEWAY_TCP_MODBUS_GATEWAY
 
 config SMARTGATEWAY_TCP_CLIENT_MODE
 	bool "TCP 클라이언트: 원격 서버에 connect (보드는 클라이언트)"
-	default n
+	default y
 	depends on SMARTGATEWAY_TCP_MODBUS_GATEWAY
 	help
 	  y이면 SMARTGATEWAY_TCP_PEER_IP:PEER_PORT 로 접속합니다. 원격(MCNX947 등)이
@@ -285,6 +338,14 @@ config SMARTGATEWAY_TCP_STREAM_BUF
 	help
 	  최소 권장: 5 + SMARTGATEWAY_TCP_MAX_BODY + 1 (한 프레임).
 
+config SMARTGATEWAY_TCP_START_DELAY_MS
+	int "TCP 게이트웨이 태스크 시작 전 지연 (ms)"
+	default 0
+	range 0 600000
+	depends on SMARTGATEWAY_TCP_MODBUS_GATEWAY
+	help
+	  부팅 직후 다른 태스크·네트워크 준비 시간 확보용.
+
 comment "보드(이 기기)의 고정 IPv4는 Zephyr 표준 옵션으로 prj.conf 에서 설정합니다:"
 comment "  CONFIG_NET_CONFIG_MY_IPV4_ADDR, CONFIG_NET_CONFIG_MY_IPV4_GW, CONFIG_NET_CONFIG_MY_IPV4_NETMASK"
 
@@ -365,6 +426,47 @@ config SMARTGATEWAY_WIFI_STATIC_NETMASK
 config SMARTGATEWAY_WIFI_STATIC_GW
 	string "WiFi 인터페이스 기본 게이트웨이"
 	default "10.108.214.1"
+
+config SMARTGATEWAY_WIFI_TCP_PEER_IP
+	string "WiFi TCP 상대(서버) IPv4"
+	default "192.168.88.3"
+	help
+	  NVS의 wifi_tcp_server_ip 기본값.
+
+config SMARTGATEWAY_WIFI_TCP_PEER_PORT
+	int "WiFi TCP 상대 포트"
+	default 20273
+	range 1 65535
+
+config SMARTGATEWAY_DEFER_WIFI_CONNECT_MS
+	int "WiFi 연결 시도 전 추가 지연 (ms, 0=없음)"
+	default 0
+	range 0 600000
+	help
+	  네트워크 매니저가 WiFi 연결 전 대기하는 시간(RAM/crypto 피크 분산 등).
+
+config SMARTGATEWAY_WIFI_WPA3_TRANSITION_AP
+	bool "WPA3 전환(AP 혼합) — wifi 확장·문서용"
+	default n
+
+config SMARTGATEWAY_WIFI_WPA3_MFP_REQUIRED
+	bool "PMF(802.11w) 필수 — wifi 확장·문서용"
+	default n
+
+config SMARTGATEWAY_WIFI_SCAN_BAND_2_4_GHZ
+	bool "2.4GHz 스캔 우선 — wifi 확장·문서용"
+	default n
+
+config SMARTGATEWAY_WIFI_FIXED_CHANNEL
+	int "고정 WiFi 채널 (0=전체 스캔)"
+	default 0
+	range 0 255
+
+config SMARTGATEWAY_WIFI_TEST_NO_ETH
+	bool "테스트: WiFi-only 오버레이(이더넷 생략·별도 conf와 함께)"
+	default n
+	help
+	  일부 빌드에서 ETH를 제외할 때 netmgr 로그용. prj_wifi_only_test.conf 등과 함께 사용.
 
 endif # SMARTGATEWAY_WIFI_ENABLE
 

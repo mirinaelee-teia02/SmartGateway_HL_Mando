@@ -1,17 +1,15 @@
 /*
- * Smart Gateway — TCP ↔ RS-232 Modbus 게이트웨이
+ * Smart Gateway — TCP 클라이언트 ↔ RS-232 Modbus 게이트웨이
  *
- * 규격(4가지):
- *   ① 보드→서버(최초 연결): STX + MsgType + Seq + Body + ETX — Len·Error 없음 (0x80 CONNECT).
- *      Body = 마스터(ASCII) + 버전 헥사; Kconfig 기본 + 선택 시 SD FAT 텍스트 덮어쓰기.
- *   ② 서버→보드(①에 대한 응답): STX + MsgType + Seq + Timestamp + ETX — Timestamp=7B(time_helper).
- *   ③ 서버→보드(이후 주기 등): STX + Length(2,BE) + MsgType + Seq + Body + ETX — Tail Error 없음.
- *   ④ 보드→서버(RS-232/Modbus 결과): STX + Len_BE + MsgType + Seq + Body + Error + ETX (0x81).
+ * 보드가 원격 서버에 connect. 탈취·listen 서버 모드 없음.
+ * 연결 후 CONFIG_SMARTGATEWAY_TCP_HANDSHAKE_POLL_MS 간격으로 0x80(CONNECT) 반복 → 0x00 TIMESYNC 수신 후 세션.
  */
 
 #include "tcp_gateway.h"
 #include "rs232.h"
 #include "sync_gate.h"
+#include "config_nvs.h"
+#include "network_manager.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -45,16 +43,7 @@
 #define GW_MSG_CONNECT		  	0x80	/* CONNECT: 핸드셰이크 송신용 */
 #define GW_ERR_RS232_TIMEOUT	0xE3	/* 세션 응답 Tail Error (UART 실패) */
 #define GW_BODY_CAP		  		256		/* 정적 버퍼(gw_mb_resp 등) 최대 Body 바이트 */
-#define GW_MSG_CONN_REQ		  	0x70	/* 클라이언트→보드: 연결 요청(탈취 여부) */
-#define GW_CONN_REQ_BODY_LEN	11		/* 0x70 Body 고정 길이 */
-#define GW_CONN_REQ_FRAME_LEN	(GW_SRV_RX_HDR3_LEN + GW_CONN_REQ_BODY_LEN + GW_SRV_RX_TAIL_LEN) /* 15B */
-
-/* 강제 탈취 Body 패턴 (11바이트) — 서버 모드 전용 */
-#if !IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE)
-static const uint8_t gw_takeover_body[GW_CONN_REQ_BODY_LEN] = {
-	0x1F, 0x2F, 0x3F, 0x4F, 0x5F, 0x6F, 0x7F, 0x8F, 0x9F, 0xAF, 0xFF
-};
-#endif
+/* 0x80 재전송 간격: CONFIG_SMARTGATEWAY_TCP_HANDSHAKE_POLL_MS (prj.conf, 기본 2000) */
 
 BUILD_ASSERT(CONFIG_SMARTGATEWAY_TCP_MAX_BODY <= GW_BODY_CAP);
 #define GW_MAX_BODY CONFIG_SMARTGATEWAY_TCP_MAX_BODY /* Kconfig: 프레임 Body 최대 허용 */
@@ -62,20 +51,9 @@ BUILD_ASSERT(CONFIG_SMARTGATEWAY_TCP_MAX_BODY <= GW_BODY_CAP);
 BUILD_ASSERT(CONFIG_SMARTGATEWAY_TCP_STREAM_BUF >=
 	     (GW_TX_HDR_LEN + GW_MAX_BODY + GW_TX_TAIL_LEN));
 
-/* 클라이언트 모드: 단일 스레드 */
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE)
-#define TCP_GW_STACK 6144
+#define TCP_GW_STACK 2048
 K_THREAD_STACK_DEFINE(tcp_gw_stack, TCP_GW_STACK);
 static struct k_thread tcp_gw_thr;
-#else
-/* 서버 모드: accept 스레드 + session 스레드 분리 */
-#define TCP_GW_ACCEPT_STACK  2048
-#define TCP_GW_SESSION_STACK 6144
-K_THREAD_STACK_DEFINE(tcp_gw_accept_stk, TCP_GW_ACCEPT_STACK);
-K_THREAD_STACK_DEFINE(tcp_gw_session_stk, TCP_GW_SESSION_STACK);
-static struct k_thread tcp_gw_accept_thr;
-static struct k_thread tcp_gw_session_thr;
-#endif
 
 /* TCP 수신 누적 버퍼: 한 번에 오지 않는 프레임을 맞추기 위해 append 후 파싱 */
 static uint8_t gw_rx_buf[CONFIG_SMARTGATEWAY_TCP_STREAM_BUF];
@@ -87,19 +65,6 @@ static uint8_t gw_tx_frame[GW_TX_HDR_LEN + GW_BODY_CAP + GW_TX_TAIL_LEN];
 /** 0x80(CONNECT) Body: gw_init_connect_body_once() */
 static uint8_t gw_connect_body[GW_BODY_CAP];
 static uint16_t gw_connect_body_len;
-
-/* 서버 모드 공유 상태: accept 스레드 ↔ session 스레드 */
-#if !IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE)
-#define GW_CFD_NONE    (-1) /* 세션 없음 */
-#define GW_CFD_PENDING (-2) /* 탈취 완료·새 세션 대기 중 (이 기간 신규 연결 거부) */
-static int gw_active_cfd  = GW_CFD_NONE;
-static int gw_pending_cfd = GW_CFD_NONE;
-static K_MUTEX_DEFINE(gw_fd_mtx);
-static K_SEM_DEFINE(gw_pending_sem, 0, 1);
-static volatile bool gw_session_should_stop;   /* accept → session: 강제 종료 */
-static volatile bool gw_session_paused;        /* accept → session: 일시 중지 (0x70 평가 중) */
-static volatile bool gw_session_establishing;  /* session: 5초 대기 중 — 신규 연결 모두 거부 */
-#endif
 
 /** 마스터 문자열을 바이트열로 복사(NUL 제외). 반환: 복사한 바이트 수(최대 dst_cap) */
 static size_t gw_copy_master_ascii(const char *src, uint8_t *dst, size_t dst_cap)
@@ -173,7 +138,7 @@ static void gw_init_connect_body_once(void)
 	char master[128];
 	char ver_hex[48];
 
-	strncpy(master, CONFIG_SMARTGATEWAY_LINE_ID, sizeof(master) - 1);
+	strncpy(master, g_gw_config.master_code, sizeof(master) - 1);
 	master[sizeof(master) - 1] = '\0';
 	strncpy(ver_hex, CONFIG_SMARTGATEWAY_TCP_CONNECT_VERSION_HEX, sizeof(ver_hex) - 1);
 	ver_hex[sizeof(ver_hex) - 1] = '\0';
@@ -497,123 +462,76 @@ static bool gw_process_frames_handshake(int cfd, uint8_t *rbuf, size_t *rlen)
 }
 
 /**
- * 클라이언트가 TCP 접속 직후 보내는 0x70 연결 요청 프레임 수신. (서버 모드 전용)
- * 프레임: STX(55) + 0x70 + 0x00 + Body(11B) + ETX(03) = 15바이트 고정.
- *
- * Body 패턴:
- *   비탈취: 0x01×11 — 기존 활성 연결이 있으면 신규 연결 거부
- *   탈취:   0x1F,0x2F,...,0xFF — 기존 활성 연결을 강제 종료 후 신규 수락
- *
- * @return  1: 강제 탈취, 0: 비탈취, -1: 수신/파싱 오류
- */
-#if !IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE)
-static int gw_recv_conn_req(int cfd, const char *client_ip)
-{
-	uint8_t buf[GW_CONN_REQ_FRAME_LEN];
-	size_t n = 0;
-
-	struct zsock_pollfd pfd = { .fd = cfd, .events = ZSOCK_POLLIN };
-	/* 0x70 수신 타임아웃: 2초 (빠른 거부로 accept 루프 블로킹 최소화) */
-	int64_t deadline = k_uptime_get() + 2000;
-
-	while (n < GW_CONN_REQ_FRAME_LEN) {
-		int remain_ms = (int)(deadline - k_uptime_get());
-
-		if (remain_ms <= 0) {
-			printf("[GW] [%s] 0x70 recv timeout (%u/%u B)\n",
-			       client_ip, (unsigned)n, (unsigned)GW_CONN_REQ_FRAME_LEN);
-			return -1;
-		}
-		int pr = zsock_poll(&pfd, 1, remain_ms);
-
-		if (pr <= 0 || !(pfd.revents & ZSOCK_POLLIN)) {
-			printf("[GW] [%s] 0x70 poll timeout/err\n", client_ip);
-			return -1;
-		}
-		ssize_t r = zsock_recv(cfd, buf + n, GW_CONN_REQ_FRAME_LEN - n, 0);
-
-		if (r <= 0) {
-			printf("[GW] [%s] 0x70 recv closed/err r=%zd\n", client_ip, r);
-			return -1;
-		}
-		n += (size_t)r;
-	}
-
-	gw_hex_line("SmartGateway<-Client(0x70)", buf, n);
-
-	if (buf[0] != GW_STX || buf[1] != GW_MSG_CONN_REQ ||
-	    buf[GW_CONN_REQ_FRAME_LEN - 1U] != GW_ETX) {
-		printf("[GW] [%s] 0x70 frame invalid STX=%02x Type=%02x ETX=%02x\n",
-		       client_ip, buf[0], buf[1], buf[GW_CONN_REQ_FRAME_LEN - 1U]);
-		return -1;
-	}
-
-	const uint8_t *body = buf + GW_SRV_RX_HDR3_LEN;
-	bool takeover = (memcmp(body, gw_takeover_body, GW_CONN_REQ_BODY_LEN) == 0);
-
-	printf("[GW] [%s] 0x70 conn_req: %s\n", client_ip, takeover ? "강제 탈취" : "비탈취");
-	return takeover ? 1 : 0;
-}
-#endif /* !CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE */
-
-/**
- * 핸드셰이크: 0x70 수신 완료 후 0x80(CONNECT) 1회 전송 → 0x00(TIMESYNC) 수신 대기.
- * (기존 2초 반복 전송 제거 — 0x70 선행 수신으로 연결 의사가 확인되었으므로 1회면 충분)
+ * 핸드셰이크: TIMESYNC(0x00) 올 때까지 CONFIG_SMARTGATEWAY_TCP_HANDSHAKE_POLL_MS 마다
+ * 0x80(CONNECT) 재전송(장비 마스터 통지). 수신은 항상 poll로 처리.
  */
 static bool gw_tcp_handshake(int cfd, uint8_t *rbuf, size_t *rlen)
 {
-	/* 0x80 CONNECT 1회 전송 */
-	int plen = gw_build_compact_tx(gw_tx_frame, sizeof(gw_tx_frame), GW_MSG_CONNECT, 0,
-				       gw_connect_body, gw_connect_body_len);
+	const int period_ms = (int)CONFIG_SMARTGATEWAY_TCP_HANDSHAKE_POLL_MS;
 
-	if (plen < 0 || gw_send_all(cfd, gw_tx_frame, (size_t)plen, "hs") != 0) {
-		printf("[GW] 0x80 CONNECT 전송 실패\n");
-		return false;
-	}
-	gw_hex_line("SmartGateway->Client", gw_tx_frame, (size_t)plen);
+	gw_init_connect_body_once();
 
-	/* 0x00 TIMESYNC 수신 대기 (재전송 없음) */
-	struct zsock_pollfd pfd = { .fd = cfd, .events = ZSOCK_POLLIN };
+	/* next_send_ms == 0 → 첫 프레임은 즉시 송신 */
+	int64_t next_send_ms = 0;
 
 	for (;;) {
-		if (gw_session_should_stop) {
-			return false; /* 탈취 신호 — 즉시 종료 */
-		}
-		int pr = zsock_poll(&pfd, 1, CONFIG_SMARTGATEWAY_TCP_HANDSHAKE_POLL_MS);
+		int64_t now = k_uptime_get();
 
-		if (gw_session_should_stop) {
-			return false;
+		if (now >= next_send_ms) {
+			int plen = gw_build_compact_tx(gw_tx_frame, sizeof(gw_tx_frame), GW_MSG_CONNECT, 0,
+						       gw_connect_body, gw_connect_body_len);
+
+			if (plen > 0) {
+				if (gw_send_all(cfd, gw_tx_frame, (size_t)plen, "ann") != 0) {
+					printf("[GW] 0x80 CONNECT 송신 실패\n");
+					return false;
+				}
+				gw_hex_line("SmartGateway->Server", gw_tx_frame, (size_t)plen);
+			}
+			next_send_ms = now + (int64_t)period_ms;
 		}
+
+		int64_t ms_left = next_send_ms - k_uptime_get();
+		int poll_to = 0;
+
+		if (ms_left > 0) {
+			poll_to = (ms_left > (int64_t)period_ms) ? period_ms : (int)ms_left;
+			if (poll_to < 1) {
+				poll_to = 1;
+			}
+		}
+
+		struct zsock_pollfd pfd = { .fd = cfd, .events = ZSOCK_POLLIN };
+		int pr = zsock_poll(&pfd, 1, poll_to);
+
 		if (pr < 0) {
 			printf("[GW] handshake poll errno=%d\n", errno);
 			return false;
 		}
-		if (pr == 0) {
-			continue; /* 0x00 대기 중 — 재전송 없이 계속 대기 */
-		}
-		if (pfd.revents & (ZSOCK_POLLHUP | ZSOCK_POLLERR)) {
-			printf("[GW] handshake peer closed\n");
-			return false;
-		}
-		if (!(pfd.revents & ZSOCK_POLLIN)) {
-			continue;
-		}
-		if (*rlen >= sizeof(gw_rx_buf)) {
-			*rlen = 0;
-		}
-		ssize_t n = zsock_recv(cfd, rbuf + *rlen, sizeof(gw_rx_buf) - *rlen, 0);
+		if (pr > 0) {
+			if (pfd.revents & (ZSOCK_POLLHUP | ZSOCK_POLLERR)) {
+				printf("[GW] handshake peer closed\n");
+				return false;
+			}
+			if (pfd.revents & ZSOCK_POLLIN) {
+				if (*rlen >= sizeof(gw_rx_buf)) {
+					*rlen = 0;
+				}
+				ssize_t n = zsock_recv(cfd, rbuf + *rlen, sizeof(gw_rx_buf) - *rlen, 0);
 
-		if (n == 0) {
-			printf("[GW] handshake peer closed\n");
-			return false;
-		}
-		if (n < 0) {
-			printf("[GW] handshake recv errno=%d\n", errno);
-			return false;
-		}
-		*rlen += (size_t)n;
-		if (gw_process_frames_handshake(cfd, rbuf, rlen)) {
-			return true;
+				if (n == 0) {
+					printf("[GW] handshake peer closed\n");
+					return false;
+				}
+				if (n < 0) {
+					printf("[GW] handshake recv errno=%d\n", errno);
+					return false;
+				}
+				*rlen += (size_t)n;
+				if (gw_process_frames_handshake(cfd, rbuf, rlen)) {
+					return true;
+				}
+			}
 		}
 	}
 }
@@ -631,31 +549,15 @@ static bool gw_tcp_handshake(int cfd, uint8_t *rbuf, size_t *rlen)
  */
 static void gw_handle_client(int cfd)
 {
-	uint8_t *const rbuf = gw_rx_buf; 
-	size_t rlen = 0;		 
+	uint8_t *const rbuf = gw_rx_buf;
+	size_t rlen = 0;
 
-	gw_init_connect_body_once();
-
-	/* ① Client→GW: 0x70 수신 (서버 루프에서 처리 완료)
-	 * ② GW→Client: 0x80 CONNECT 1회 | ③ Client→GW: 0x00 TIMESYNC | ④ 응답 */
 	if (!gw_tcp_handshake(cfd, rbuf, &rlen)) {
 		printf("[GW] handshake failed\n");
 		return;
 	}
 
-	// 서버의 데이터를 계속 받는 작업
 	for (;;) {
-		if (gw_session_should_stop) {
-			printf("[GW] 세션 강제 종료 신호 수신\n");
-			break;
-		}
-
-		/* 일시 중지: 2번 클라이언트 0x70 평가 중 — 새 RS-232 처리 보류 */
-		if (gw_session_paused) {
-			k_msleep(50);
-			continue;
-		}
-
 		if (rlen >= sizeof(gw_rx_buf)) {
 			printf("[GW] TCP rx buffer full — reset\n");
 			rlen = 0;
@@ -665,10 +567,6 @@ static void gw_handle_client(int cfd)
 		struct zsock_pollfd mpfd = { .fd = cfd, .events = ZSOCK_POLLIN };
 		int pr = zsock_poll(&mpfd, 1, 300);
 
-		if (gw_session_should_stop) {
-			printf("[GW] 세션 강제 종료 신호 수신\n");
-			break;
-		}
 		if (pr < 0) {
 			printf("[GW] recv poll errno=%d\n", errno);
 			break;
@@ -847,10 +745,25 @@ static void gw_handle_client(int cfd)
 
 static void tcp_gateway_task(void *a, void *b, void *c)
 {
-	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
 
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE)
+#if CONFIG_SMARTGATEWAY_TCP_START_DELAY_MS > 0
+	printf("[GW] TCP 클라이언트 시작 지연 %u ms\n",
+	       (unsigned)CONFIG_SMARTGATEWAY_TCP_START_DELAY_MS);
+	k_msleep(CONFIG_SMARTGATEWAY_TCP_START_DELAY_MS);
+#endif
+
 	for (;;) {
+		const char *peer_host = netmgr_tcp_peer_ip();
+		uint16_t    peer_port = netmgr_tcp_peer_port();
+
+		if (peer_host == NULL || peer_host[0] == '\0' || peer_port == 0U) {
+			peer_host = CONFIG_SMARTGATEWAY_TCP_PEER_IP;
+			peer_port = (uint16_t)CONFIG_SMARTGATEWAY_TCP_PEER_PORT;
+		}
+
 		int cfd = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
 		if (cfd < 0) {
@@ -862,21 +775,19 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 		struct sockaddr_in peer = { 0 };
 
 		peer.sin_family = AF_INET;
-		peer.sin_port = htons((uint16_t)CONFIG_SMARTGATEWAY_TCP_PEER_PORT);
-		if (zsock_inet_pton(AF_INET, CONFIG_SMARTGATEWAY_TCP_PEER_IP, &peer.sin_addr) != 1) {
-			printf("[GW] TCP_PEER_IP 변환 실패: %s\n", CONFIG_SMARTGATEWAY_TCP_PEER_IP);
+		peer.sin_port = htons(peer_port);
+		if (zsock_inet_pton(AF_INET, peer_host, &peer.sin_addr) != 1) {
+			printf("[GW] TCP peer IP 변환 실패: %s\n", peer_host);
 			zsock_close(cfd);
 			k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
 			continue;
 		}
 
-		printf("[GW] TCP connect -> %s:%u (RX: STX+Len+Msg+Seq+Body+ETX / TX: 5+%u+2)\n",
-		       CONFIG_SMARTGATEWAY_TCP_PEER_IP,
-		       (unsigned)CONFIG_SMARTGATEWAY_TCP_PEER_PORT, (unsigned)GW_MAX_BODY);
+		printf("[GW] TCP connect -> %s:%u (활성 인터페이스 기준 NVS/g_w peer)\n", peer_host,
+		       (unsigned)peer_port);
 
 		if (zsock_connect(cfd, (struct sockaddr *)&peer, sizeof(peer)) != 0) {
-			printf("[GW] connect %s:%u errno=%d\n", CONFIG_SMARTGATEWAY_TCP_PEER_IP,
-			       (unsigned)CONFIG_SMARTGATEWAY_TCP_PEER_PORT, errno);
+			printf("[GW] connect %s:%u errno=%d\n", peer_host, (unsigned)peer_port, errno);
 			zsock_close(cfd);
 			k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
 			continue;
@@ -886,221 +797,17 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 		zsock_close(cfd);
 		k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
 	}
-#endif
 }
-
-/* ============================================================
- * 서버 모드 전용: accept 스레드 + session 스레드
- * ============================================================
- * accept 스레드: 항상 listen → 0x70 수신 → 탈취 판별 → session 스레드에 fd 인계
- * session 스레드: fd 인계받아 0x80/0x00 핸드셰이크 후 0x01/0x81 통신 처리
- *
- * 탈취 시: accept 스레드가 gw_active_cfd 를 닫으면 session 스레드의
- *           zsock_recv() 가 에러 반환 → gw_handle_client() 자연 종료
- * ============================================================ */
-#if !IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE)
-
-static void gw_accept_thread_fn(void *a, void *b, void *c)
-{
-	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
-
-	int fd = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (fd < 0) {
-		printf("[GW] socket() 실패\n");
-		return;
-	}
-
-	int one = 1;
-	(void)zsock_setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-	struct sockaddr_in sin = { 0 };
-	sin.sin_family = AF_INET;
-	sin.sin_port   = htons((uint16_t)CONFIG_SMARTGATEWAY_ETH_TCP_LISTEN_PORT);
-	if (zsock_inet_pton(AF_INET, CONFIG_SMARTGATEWAY_ETH_TCP_BIND_IP, &sin.sin_addr) != 1) {
-		printf("[GW] TCP_BIND_IP 변환 실패: %s\n", CONFIG_SMARTGATEWAY_ETH_TCP_BIND_IP);
-		zsock_close(fd);
-		return;
-	}
-	if (zsock_bind(fd, (struct sockaddr *)&sin, sizeof(sin)) != 0) {
-		printf("[GW] bind %s:%u errno=%d\n",
-		       CONFIG_SMARTGATEWAY_ETH_TCP_BIND_IP,
-		       (unsigned)CONFIG_SMARTGATEWAY_ETH_TCP_LISTEN_PORT, errno);
-		zsock_close(fd);
-		return;
-	}
-	if (zsock_listen(fd, 1) != 0) {
-		printf("[GW] listen errno=%d\n", errno);
-		zsock_close(fd);
-		return;
-	}
-
-	printf("[GW] TCP listen %s:%u\n",
-	       CONFIG_SMARTGATEWAY_ETH_TCP_BIND_IP,
-	       (unsigned)CONFIG_SMARTGATEWAY_ETH_TCP_LISTEN_PORT);
-
-	for (;;) {
-		struct sockaddr_in peer_addr = { 0 };
-		socklen_t peer_len = sizeof(peer_addr);
-		int new_cfd = zsock_accept(fd, (struct sockaddr *)&peer_addr, &peer_len);
-		if (new_cfd < 0) {
-			k_msleep(100);
-			continue;
-		}
-
-		/* 클라이언트 IP 문자열 변환 (로그 식별용) */
-		char client_ip[INET_ADDRSTRLEN] = "?.?.?.?";
-		zsock_inet_ntop(AF_INET, &peer_addr.sin_addr, client_ip, sizeof(client_ip));
-
-		k_mutex_lock(&gw_fd_mtx, K_FOREVER);
-		bool has_active = (gw_active_cfd >= 0);
-		/* GW_CFD_PENDING: 탈취 완료·session thread 인수 전 / gw_session_establishing: 5초 대기 중
-		 * 두 경우 모두 신규 연결 거부 */
-		bool is_establishing = gw_session_establishing || (gw_active_cfd == GW_CFD_PENDING);
-		k_mutex_unlock(&gw_fd_mtx);
-
-		/* 탈취 처리 중 or 세션 초기화 대기 중(5초)이면 모든 신규 연결 즉시 거부 */
-		if (is_establishing) {
-			printf("[GW] [%s] 세션 초기화 중 — 연결 거부\n", client_ip);
-			zsock_close(new_cfd);
-			continue;
-		}
-
-		/* 활성 세션이 있으면 RS-232 즉시 중단 + 0x70 평가 동안 일시 중지 */
-		if (has_active) {
-			rs232_abort_txrx();              /* 진행 중 RS-232 즉시 중단 */
-			gw_session_paused = true;
-			printf("[GW] [%s] 새 연결 — RS-232 중단·세션 일시 중지, 0x70 평가 중\n", client_ip);
-		} else {
-			printf("[GW] [%s] 새 연결 수락\n", client_ip);
-		}
-
-		/* 0x70 연결 요청 수신 */
-		int takeover = gw_recv_conn_req(new_cfd, client_ip);
-
-		k_mutex_lock(&gw_fd_mtx, K_FOREVER);
-
-		/* 0x70 오류: 거부 후 기존 세션 재개 */
-		if (takeover < 0) {
-			printf("[GW] [%s] 0x70 오류 — 연결 거부, 기존 세션 재개\n", client_ip);
-			zsock_close(new_cfd);
-			gw_session_paused = false;
-			if (has_active) { rs232_abort_clear(); } /* 중단된 RS-232 플래그 리셋 */
-			k_mutex_unlock(&gw_fd_mtx);
-			continue;
-		}
-
-		/* 비탈취: 기존 세션 재개 후 거부 */
-		if (takeover == 0 && gw_active_cfd != GW_CFD_NONE) {
-			printf("[GW] [%s] 비탈취 — 기존 세션 재개, 신규 거부\n", client_ip);
-			zsock_close(new_cfd);
-			gw_session_paused = false;
-			rs232_abort_clear(); /* 중단된 RS-232 플래그 리셋 */
-			k_mutex_unlock(&gw_fd_mtx);
-			continue;
-		}
-
-		/* 강제 탈취: 기존 실제 세션 fd 즉시 종료 */
-		if (takeover == 1 && gw_active_cfd >= 0) {
-			printf("[GW] [%s] 강제 탈취 — 기존 연결(fd=%d) 즉시 종료\n",
-			       client_ip, gw_active_cfd);
-			rs232_abort_txrx();              /* RS-232 수신 루프 즉시 중단 */
-			gw_session_should_stop = true;
-			zsock_shutdown(gw_active_cfd, ZSOCK_SHUT_RDWR);
-		}
-		/* 탈취 대기 중 재탈취: 기존 pending fd 교체 */
-		if (takeover == 1 && gw_pending_cfd >= 0) {
-			printf("[GW] [%s] 대기 중 재탈취 — pending fd=%d 닫기\n",
-			       client_ip, gw_pending_cfd);
-			zsock_close(gw_pending_cfd);
-			gw_pending_cfd = GW_CFD_NONE;
-		}
-		if (takeover == 1) {
-			gw_active_cfd = GW_CFD_PENDING; /* 신규 연결 진입 차단 */
-		}
-
-		/* session 스레드로 fd 인계 — 즉시 0x80 전송 */
-		gw_pending_cfd = new_cfd;
-		k_mutex_unlock(&gw_fd_mtx);
-		k_sem_give(&gw_pending_sem);
-	}
-}
-
-static void gw_session_thread_fn(void *a, void *b, void *c)
-{
-	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
-
-	for (;;) {
-		/* accept 스레드가 줄 때까지 대기 */
-		k_sem_take(&gw_pending_sem, K_FOREVER);
-
-		k_mutex_lock(&gw_fd_mtx, K_FOREVER);
-		int cfd = gw_pending_cfd;
-		gw_pending_cfd = GW_CFD_NONE;
-		gw_active_cfd  = cfd; /* GW_CFD_PENDING → 실제 fd로 교체 */
-		/* 탈취 여부: accept 스레드가 stop 플래그를 세운 뒤 세마포어를 준 경우 */
-		bool was_takeover = gw_session_should_stop;
-		gw_session_should_stop = false;
-		gw_session_paused = false;
-		if (was_takeover) {
-			gw_session_establishing = true; /* 뮤텍스 안에서 설정 — accept 경쟁 창 제거 */
-		}
-		k_mutex_unlock(&gw_fd_mtx);
-
-		if (was_takeover) {
-			/* RS-232 중단 플래그 초기화 후 5초 대기 — 이 기간 신규 연결 모두 거부됨 */
-			rs232_abort_clear();
-			printf("[GW] 탈취 완료 — 5초 대기 후 새 클라이언트(fd=%d)에 0x80 전송\n", cfd);
-			k_msleep(5000);
-			gw_session_establishing = false;
-			printf("[GW] 5초 대기 완료 — 새 클라이언트(fd=%d)에 0x80 전송\n", cfd);
-		}
-
-		/* 0x80 CONNECT → 0x00 TIMESYNC(+RS-232 설정) → 0x81 설정 결과 → 0x01/0x82 통신 */
-		gw_handle_client(cfd);
-
-		/* 세션 종료 정리 */
-		k_mutex_lock(&gw_fd_mtx, K_FOREVER);
-		if (gw_active_cfd == cfd) {
-			/* 정상 종료: 아직 active — 직접 닫기 */
-			zsock_close(cfd);
-			gw_active_cfd = GW_CFD_NONE;
-		} else {
-			/* 탈취: accept 스레드가 shutdown만 했으므로 여기서 close 완료 */
-			zsock_close(cfd);
-		}
-		k_mutex_unlock(&gw_fd_mtx);
-	}
-}
-
-#endif /* !CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE */
 
 int tcp_gateway_task_start(void)
 {
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_CLIENT_MODE)
 	k_tid_t t = k_thread_create(&tcp_gw_thr, tcp_gw_stack,
 				    K_THREAD_STACK_SIZEOF(tcp_gw_stack), tcp_gateway_task, NULL,
 				    NULL, NULL, 5, 0, K_NO_WAIT);
+
 	if (t == NULL) {
 		return -1;
 	}
 	k_thread_name_set(t, "tcp_gw_client");
-#else
-	/* 서버 모드: accept 스레드 + session 스레드 */
-	k_tid_t ta = k_thread_create(&tcp_gw_accept_thr, tcp_gw_accept_stk,
-				     K_THREAD_STACK_SIZEOF(tcp_gw_accept_stk),
-				     gw_accept_thread_fn, NULL, NULL, NULL, 5, 0, K_NO_WAIT);
-	if (ta == NULL) {
-		return -1;
-	}
-	k_thread_name_set(ta, "tcp_gw_accept");
-
-	k_tid_t ts = k_thread_create(&tcp_gw_session_thr, tcp_gw_session_stk,
-				     K_THREAD_STACK_SIZEOF(tcp_gw_session_stk),
-				     gw_session_thread_fn, NULL, NULL, NULL, 5, 0, K_NO_WAIT);
-	if (ts == NULL) {
-		return -1;
-	}
-	k_thread_name_set(ts, "tcp_gw_session");
-#endif
 	return 0;
 }

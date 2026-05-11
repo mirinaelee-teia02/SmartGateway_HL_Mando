@@ -1,0 +1,25 @@
+/*
+ * WiFi 전용 테스트: 보드 내장 이더넷(ENET QoS) 디바이스 비활성화
+ * ─ ENET 컨트롤러/RX 디스크립터 버퍼/PHY 스택이 빌드·RAM에서 빠짐
+ * ─ 케이블 꽂여 있어도 MAC이 안 올라와 WiFi 디버깅에 유리함
+ *
+ * CMakeLists 에서 CMake 옵션 SMARTGATEWAY_WIFI_ONLY_TEST=ON 일 때 자동으로 이 오버레이 +
+ * prj_wifi_only_test.conf 가 붙음. 수동 빌드:
+ *   west build ... -d debug-wifi-test --pristine -- -DSMARTGATEWAY_WIFI_ONLY_TEST=ON
+ */
+
+&enet {
+	status = "disabled";
+};
+
+&enet_mac {
+	status = "disabled";
+};
+
+&enet_mdio {
+	status = "disabled";
+};
+
+&phy {
+	status = "disabled";
+};

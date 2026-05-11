@@ -8,16 +8,15 @@
  *   CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY + sync_gate — 아래 “게이트” 동작
  *
  * 메인 루프(udp_task while(1)):
- *   1) SMARTGATEWAY_UDP_BIND_PORT>0 이면 udp_try_rx: poll(0) 논블로킹 → 있으면 recvfrom+hex
- *      (애플리케이션 프로토콜 해석 없음; 디버그/스니퍼 성격)
- *   2) adc_get_latest(&snap): 실패 시 skip_count로 스팸 방지 로그 후 INTERVAL 만큼 sleep
- *   3) msgpack_encode_* → tx_buf, zsock_sendto(peer)
- *   4) k_msleep(UDP_SEND_INTERVAL_MS) — 전송 주기와 ADC 샘플링 흐름 맞춤
+ *   1) (TCP 게이트 켜짐) TIMESYNC 전이면 sleep 후 continue
+ *   2) SMARTGATEWAY_UDP_BIND_PORT>0 이면 udp_try_rx: poll(0) → recvfrom+hex
+ *   3) adc_get_latest(&snap) → msgpack → sendto
+ *   4) k_msleep(UDP_SEND_INTERVAL_MS)
  *
  * TCP Modbus 게이트웨이가 켜진 빌드:
- *   sg_udp_rx_allowed() 가 false 인 동안(보통 TCP에서 TIMESYNC 0x00 처리 전)
- *   udp_try_rx 는 즉시 return — 소켓 큐에 패킷이 쌓일 수 있으나 이 태스크는 읽지 않음.
- *   0x00 처리 후 true 가 되면 기존과 같이 RX 로그 가능.
+ *   TCP에서 TIMESYNC(MsgType 0x00)를 받아 sg_timesync_from_tcp_notify()가 호출되기 전
+ *   sg_udp_allowed() == false — UDP TX(ADC MessagePack)와 udp_try_rx(RX) 모두 대기.
+ *   0x00 수신 후 true: 기존과 같이 주기 송수신.
  *
  * wait_for_network / on_net_event:
  *   __attribute__((unused)) 로 컴파일 유지. 부팅 직후 IP 할당 전에 UDP 시작해야 할 때
@@ -107,14 +106,13 @@ static struct k_thread udp_task_data;			 /* udp 스레드 제어 블록 */
 #if UDP_BIND_PORT > 0
 /**
  * bind 된 UDP 소켓에서 읽을 데이터가 있으면 recvfrom 후 앞 64바이트 hex 출력.
- * TCP 게이트웨이 + sync_gate: 시각동기(0x00) 전에는 RX 하지 않음.
+ * TCP 게이트웨이 + sync_gate: TIMESYNC(0x00) 전에는 RX 하지 않음.
  */
 /* sock: bind 된 UDP 소켓 fd */
 static void udp_try_rx(int sock)
 {
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY)
-	if (!sg_udp_rx_allowed()) {
-		/* 시각동기 전: RX 비활성 — 메인 루프는 계속 ADC/TX 수행 */
+	if (!sg_udp_allowed()) {
 		return;
 	}
 #endif
@@ -185,7 +183,7 @@ static void udp_task(void *p1, void *p2, void *p3)
 		return;
 	}
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY)
-	printf("[UDP] bind :%u (RX after TCP 0x00 sync)\n",
+	printf("[UDP] bind :%u (TX/RX after TCP 0x00 TIMESYNC)\n",
 	       (unsigned)UDP_BIND_PORT);
 #else
 	printf("[UDP] bind :%u (RX enabled)\n", (unsigned)UDP_BIND_PORT);
@@ -206,6 +204,19 @@ static void udp_task(void *p1, void *p2, void *p3)
 	static uint32_t skip_count; /* 연속 skip 횟수(로그 스팸 제한) */
 
 	while (1) {
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY)
+		if (!sg_udp_allowed()) {
+			static bool udp_gate_msg;
+
+			if (!udp_gate_msg) {
+				printf("[UDP] waiting for TCP TIMESYNC (0x00) — no TX/RX yet\n");
+				udp_gate_msg = true;
+			}
+			k_msleep(UDP_SEND_INTERVAL_MS);
+			continue;
+		}
+#endif
+
 #if UDP_BIND_PORT > 0
 		udp_try_rx(udp_sock);
 #endif

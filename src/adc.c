@@ -7,6 +7,7 @@
  */
 
 #include "adc.h"
+#include "config_nvs.h"
 #include "time_helper.h"
 #include <stdio.h>
 #include <zephyr/autoconf.h>
@@ -93,7 +94,7 @@ static void adc_task(void *p1, void *p2, void *p3)
 	}
 	window_sample_count = 0;
 
-	strncpy(adc_snapshot.line, CONFIG_SMARTGATEWAY_LINE_ID, ADC_LINE_ID_MAX_CHARS);
+	strncpy(adc_snapshot.line, g_gw_config.master_code, ADC_LINE_ID_MAX_CHARS);
 	adc_snapshot.line[ADC_LINE_ID_MAX_CHARS] = '\0';
 
 	printf("[ADC] LPADC0 시작: %dch, %dms 사이클, %dms 윈도우\n",
@@ -122,6 +123,8 @@ static void adc_task(void *p1, void *p2, void *p3)
 
 				get_datetime(&adc_snapshot.datetime);
 				adc_snapshot.msec = (uint16_t)(k_uptime_get_32() % 1000U);
+				strncpy(adc_snapshot.line, g_gw_config.master_code, ADC_LINE_ID_MAX_CHARS);
+				adc_snapshot.line[ADC_LINE_ID_MAX_CHARS] = '\0';
 				for (int i = 0; i < ADC_CHANNEL_COUNT; i++) {
 					uint16_t v = (uint16_t)adc_buffer[i];
 

@@ -33,7 +33,7 @@ typedef struct {
 
 /* ADC 스냅샷 (2초 주기 전송용) */
 typedef struct {
-	char       line[ADC_LINE_MAX_LEN];       /* 라인 ID 문자열, NUL 종료 */
+	char       line[ADC_LINE_MAX_LEN];       /* 라인 ID 문자열, NUL 종료 (NVS master_code와 동기) */
 	datetime_t datetime;                     /* 전송 시각 (초) */
 	uint16_t   msec;                         /* 로컬 보관용(UDP 타임스탬프 문자열에는 미사용) */
 	float      raw[ADC_MAX_CHANNELS];        /* 최신 샘플 전압 (V, 0~Vref) */

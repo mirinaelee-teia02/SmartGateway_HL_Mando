@@ -21,7 +21,7 @@ void sg_timesync_from_tcp_notify(const uint8_t *body, size_t body_len)
 	sg_time_ok = true;
 }
 
-bool sg_udp_rx_allowed(void)
+bool sg_udp_allowed(void)
 {
 	return sg_time_ok;
 }
