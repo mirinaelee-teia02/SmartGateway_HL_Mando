@@ -14,7 +14,10 @@
 /** 현재 시각을 datetime_t로 채움 (ADC·UDP 타임스탬프용) */
 void get_datetime(datetime_t *dt);
 
-/** TCP 시각 동기(MsgType 0x00) Body (7바이트 이상). */
+/** TCP 시각 동기(MsgType 0x00) Body: 시간 9바이트(yyyy,MM,dd,HH,mm,ss,ms). */
 void time_sync_from_tcp_timesync_body(const uint8_t *body, size_t body_len);
+
+/** 현재 시간을 프로토콜 9바이트 형식으로 인코딩. */
+void time_encode_now_9(uint8_t out[9]);
 
 #endif /* TIME_HELPER_H */

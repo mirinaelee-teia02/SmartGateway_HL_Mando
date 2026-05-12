@@ -10,6 +10,7 @@
 #include "sync_gate.h"
 #include "config_nvs.h"
 #include "network_manager.h"
+#include "time_helper.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -31,27 +32,35 @@
 /* ③ 세션 서버→보드: STX + Len(2,BE) + MsgType + Seq + Body + ETX */
 #define GW_SRV_SESS_RX_HDR_LEN	  	5U		/* STX(1)+Len(2)+MsgType(1)+Seq(1) */
 #define GW_SRV_SESS_RX_TAIL_LEN	  	1U		/* ETX(1) */
-#define GW_TIMESTAMP_PAYLOAD_LEN  	13U		/* ② 서버 Timestamp: 시각 7B + RS-232 설정 6B */
-#define GW_RS232_CFG_BODY_OFFSET	7U		/* TIMESYNC Body 내 RS-232 설정 시작 오프셋 */
-/* 보드→서버: STX + Len_BE + MsgType + Seq + Body + Error + ETX */
+#define GW_TIME_WIRE_LEN		9U		/* yyyy(2)+MM+dd+HH+mm+ss+msec(2) */
+#define GW_RS232_CFG_WIRE_LEN		5U		/* BPS, DataBit, StopBit, Parity, Flow */
+#define GW_TIMESTAMP_PAYLOAD_LEN	(GW_TIME_WIRE_LEN + GW_RS232_CFG_WIRE_LEN)
+#define GW_RS232_CFG_BODY_OFFSET	GW_TIME_WIRE_LEN
+/* 보드→서버: STX + Len_BE + MsgType + Seq + Body + ETX */
 #define GW_TX_HDR_LEN		  	5U		/* STX(1)+Len(2)+MsgType(1)+Seq(1) */
-#define GW_TX_TAIL_LEN		  	2U		/* Error(1)+ETX(1) */
+#define GW_TX_TAIL_LEN		  	1U		/* ETX(1) */
 #define GW_MSG_TIMESYNC			0x00	/* TIMESYNC: 시각 동기 + RS-232 설정 수신 */
 #define GW_MSG_REQUEST			0x01	/* REQUEST: Body = Modbus RTU 요청 */
 #define GW_MSG_RESPONSE			0x82	/* RESPONSE: Body = Modbus RTU 응답 (구 0x81) */
 #define GW_MSG_RS232_CFG_RESP	0x81	/* RS232-CFG RESP: 0x00 TIMESYNC 수신 후 설정 결과 */
 #define GW_MSG_CONNECT		  	0x80	/* CONNECT: 핸드셰이크 송신용 */
-#define GW_ERR_RS232_TIMEOUT	0xE3	/* 세션 응답 Tail Error (UART 실패) */
 #define GW_BODY_CAP		  		256		/* 정적 버퍼(gw_mb_resp 등) 최대 Body 바이트 */
+#define GW_RESPONSE_BODY_CAP		(GW_TIME_WIRE_LEN + GW_BODY_CAP)
+#define GW_MASTER_CODE_WIRE_LEN		11U
+#define GW_DEVICE_INDEX_WIRE_LEN	1U
+#define GW_VERSION_WIRE_LEN		3U
+#define GW_CONNECT_BODY_LEN \
+	(GW_MASTER_CODE_WIRE_LEN + GW_DEVICE_INDEX_WIRE_LEN + GW_VERSION_WIRE_LEN)
+#define GW_RS232_DATA_PORT		1U
 /* 0x80 재전송 간격: CONFIG_SMARTGATEWAY_TCP_HANDSHAKE_POLL_MS (prj.conf, 기본 2000) */
 
 BUILD_ASSERT(CONFIG_SMARTGATEWAY_TCP_MAX_BODY <= GW_BODY_CAP);
 #define GW_MAX_BODY CONFIG_SMARTGATEWAY_TCP_MAX_BODY /* Kconfig: 프레임 Body 최대 허용 */
 
 BUILD_ASSERT(CONFIG_SMARTGATEWAY_TCP_STREAM_BUF >=
-	     (GW_TX_HDR_LEN + GW_MAX_BODY + GW_TX_TAIL_LEN));
+	     (GW_SRV_SESS_RX_HDR_LEN + GW_MAX_BODY + GW_SRV_SESS_RX_TAIL_LEN));
 
-#define TCP_GW_STACK 2048
+#define TCP_GW_STACK 2048 // 4096
 K_THREAD_STACK_DEFINE(tcp_gw_stack, TCP_GW_STACK);
 static struct k_thread tcp_gw_thr;
 
@@ -60,22 +69,11 @@ static uint8_t gw_rx_buf[CONFIG_SMARTGATEWAY_TCP_STREAM_BUF];
 /* RS-232(Modbus RTU) 슬레이브 응답 임시 보관 → 0x82 Body로 재포장 */
 static uint8_t gw_mb_resp[GW_BODY_CAP];
 /* 송신: ① compact(3+N+1) 또는 ④ 긴 프레임(5+N+2) — 버퍼는 ④ 기준 */
-static uint8_t gw_tx_frame[GW_TX_HDR_LEN + GW_BODY_CAP + GW_TX_TAIL_LEN];
+static uint8_t gw_tx_frame[GW_TX_HDR_LEN + GW_RESPONSE_BODY_CAP + GW_TX_TAIL_LEN];
 
 /** 0x80(CONNECT) Body: gw_init_connect_body_once() */
 static uint8_t gw_connect_body[GW_BODY_CAP];
 static uint16_t gw_connect_body_len;
-
-/** 마스터 문자열을 바이트열로 복사(NUL 제외). 반환: 복사한 바이트 수(최대 dst_cap) */
-static size_t gw_copy_master_ascii(const char *src, uint8_t *dst, size_t dst_cap)
-{
-	size_t i = 0;
-
-	for (; src[i] != '\0' && i < dst_cap; i++) {
-		dst[i] = (uint8_t)src[i];
-	}
-	return i;
-}
 
 static int gw_hex_digit(int c)
 {
@@ -135,41 +133,36 @@ static void gw_init_connect_body_once(void)
 	}
 	done = true;
 
-	char master[128];
 	char ver_hex[48];
 
-	strncpy(master, g_gw_config.master_code, sizeof(master) - 1);
-	master[sizeof(master) - 1] = '\0';
+	memset(gw_connect_body, 0, GW_CONNECT_BODY_LEN);
+
+	size_t master_len = strlen(g_gw_config.master_code);
+	size_t copy_len = MIN(master_len, (size_t)GW_MASTER_CODE_WIRE_LEN);
+
+	memcpy(gw_connect_body, g_gw_config.master_code, copy_len);
+	if (master_len != GW_MASTER_CODE_WIRE_LEN) {
+		printf("[GW] CONNECT master length %u (wire fixed %u, zero padded/truncated)\n",
+		       (unsigned)master_len, (unsigned)GW_MASTER_CODE_WIRE_LEN);
+	}
+
+	gw_connect_body[GW_MASTER_CODE_WIRE_LEN] =
+		(uint8_t)(g_gw_config.device_index & 0xffU);
+
 	strncpy(ver_hex, CONFIG_SMARTGATEWAY_TCP_CONNECT_VERSION_HEX, sizeof(ver_hex) - 1);
 	ver_hex[sizeof(ver_hex) - 1] = '\0';
 
-	size_t n_m = gw_copy_master_ascii(master, gw_connect_body, GW_BODY_CAP);
-
-	if (n_m == 0U) {
-		printf("[GW] CONNECT: empty master string\n");
-	}
-
-	int n_v = -1;
-
-	if (n_m < GW_BODY_CAP) {
-		n_v = gw_parse_hex_into(ver_hex, gw_connect_body + n_m, GW_BODY_CAP - n_m);
-	}
-	if (n_v < 0) {
+	int n_v = gw_parse_hex_into(ver_hex,
+				    gw_connect_body + GW_MASTER_CODE_WIRE_LEN +
+					    GW_DEVICE_INDEX_WIRE_LEN,
+				    GW_VERSION_WIRE_LEN);
+	if (n_v != (int)GW_VERSION_WIRE_LEN) {
 		printf("[GW] CONNECT: invalid SMARTGATEWAY_TCP_CONNECT_VERSION_HEX\n");
-		n_v = 0;
+		gw_connect_body[GW_MASTER_CODE_WIRE_LEN + GW_DEVICE_INDEX_WIRE_LEN + 0U] = 0x02;
+		gw_connect_body[GW_MASTER_CODE_WIRE_LEN + GW_DEVICE_INDEX_WIRE_LEN + 1U] = 0x00;
+		gw_connect_body[GW_MASTER_CODE_WIRE_LEN + GW_DEVICE_INDEX_WIRE_LEN + 2U] = 0x00;
 	}
-
-	unsigned total = (unsigned)n_m + (unsigned)n_v;
-
-	if (total == 0U || total > GW_MAX_BODY) {
-		printf("[GW] CONNECT body empty/overflow (len=%u) -> fallback 02 00 00\n", total);
-		gw_connect_body[0] = 0x02;
-		gw_connect_body[1] = 0x00;
-		gw_connect_body[2] = 0x00;
-		gw_connect_body_len = 3;
-	} else {
-		gw_connect_body_len = (uint16_t)total;
-	}
+	gw_connect_body_len = GW_CONNECT_BODY_LEN;
 }
 
 /** 디버그: 방향 태그와 함께 hex 덤프 */
@@ -288,30 +281,6 @@ static int gw_build_compact_tx(uint8_t *out, size_t out_cap, uint8_t msg_type, u
 	return (int)need;
 }
 
-/** ④ 보드→서버(Modbus 응답): STX + Len_BE + MsgType + Seq + Body + Error + ETX */
-static int gw_build_tx_frame(uint8_t *out, size_t out_cap, uint8_t msg_type, uint8_t seq,
-			     const uint8_t *body, uint16_t body_len, uint8_t err_code)
-{
-	const size_t need = GW_TX_HDR_LEN + body_len + GW_TX_TAIL_LEN;
-
-	if (out_cap < need || body_len > GW_MAX_BODY) {
-		return -EINVAL;
-	}
-	if (body_len > 0U && body == NULL) {
-		return -EINVAL;
-	}
-	out[0] = GW_STX;
-	sys_put_be16(body_len, out + 1);
-	out[3] = msg_type;
-	out[4] = seq;
-	if (body_len > 0U) {
-		memcpy(out + GW_TX_HDR_LEN, body, body_len);
-	}
-	out[GW_TX_HDR_LEN + body_len] = err_code;
-	out[GW_TX_HDR_LEN + body_len + 1U] = GW_ETX;
-	return (int)need;
-}
-
 /**
  * UART에서 받은 Modbus RTU 응답을 사람이 읽기 쉬운 형태로 로그.
  * - mb[0]: 슬레이브 주소, mb[1]: 기능코드(상위비트 set 이면 예외 응답)
@@ -367,42 +336,70 @@ static int gw_send_all(int fd, const uint8_t *p, size_t n, const char *tag)
 }
 
 /**
- * 핸드셰이크 수신: ② STX+MsgType+Seq+Timestamp(7B)+ETX. 0x00 한 번 처리 시 true.
- */
-/**
- * 0x00 TIMESYNC Body[7..12] RS-232 설정 적용 후 0x81 결과 응답 전송.
- * rs232_reconfigure() 최대 3회(2초 간격) 내부 처리.
+ * 0x00 TIMESYNC Body: 시간 9B + UART1 RS-232 설정 5B.
+ * 설정 적용 후 0x81 ACK(RET 1B)를 전송한다.
  */
 static void gw_apply_rs232_cfg(int cfd, const uint8_t *body, size_t body_len, uint8_t seq)
 {
-	if (body == NULL || body_len < GW_RS232_CFG_BODY_OFFSET + 6U) {
+	uint8_t resp_byte = 0x01;
+	int plen;
+
+	if (body == NULL || body_len < GW_TIMESTAMP_PAYLOAD_LEN) {
 		printf("[GW] 0x00 TIMESYNC RS-232 설정 미포함 (body_len=%u)\n", (unsigned)body_len);
-		return;
+		goto send_ack;
 	}
 
 	rs232_remote_cfg_t cfg = {
-		.protocol = body[GW_RS232_CFG_BODY_OFFSET + 0],
-		.bps      = body[GW_RS232_CFG_BODY_OFFSET + 1],
-		.data_bit = body[GW_RS232_CFG_BODY_OFFSET + 2],
-		.stop_bit = body[GW_RS232_CFG_BODY_OFFSET + 3],
-		.parity   = body[GW_RS232_CFG_BODY_OFFSET + 4],
-		.flow     = body[GW_RS232_CFG_BODY_OFFSET + 5],
+		.protocol = 0x01, /* 서버 설정에는 protocol 바이트 없음: UART1은 Modbus RTU로 처리 */
+		.bps      = body[GW_RS232_CFG_BODY_OFFSET + 0],
+		.data_bit = body[GW_RS232_CFG_BODY_OFFSET + 1],
+		.stop_bit = body[GW_RS232_CFG_BODY_OFFSET + 2],
+		.parity   = body[GW_RS232_CFG_BODY_OFFSET + 3],
+		.flow     = body[GW_RS232_CFG_BODY_OFFSET + 4],
 	};
 
-	int ret = rs232_reconfigure(0, &cfg);
-	uint8_t resp_byte = (ret == 0) ? 0x00 : 0x01;
+	int ret = rs232_reconfigure(GW_RS232_DATA_PORT, &cfg);
 
-	printf("[GW] RS-232 재설정 %s — 0x81 응답 전송\n", (ret == 0) ? "OK" : "NG");
+	resp_byte = (ret == 0) ? 0x00 : 0x01;
 
-	int plen = gw_build_compact_tx(gw_tx_frame, sizeof(gw_tx_frame),
-				       GW_MSG_RS232_CFG_RESP, seq, &resp_byte, 1);
+	printf("[GW] UART%u RS-232 재설정 %s — 0x81 ACK 전송\n",
+	       (unsigned)GW_RS232_DATA_PORT, (ret == 0) ? "OK" : "NG");
+
+send_ack:
+	plen = gw_build_compact_tx(gw_tx_frame, sizeof(gw_tx_frame),
+				   GW_MSG_RS232_CFG_RESP, seq, &resp_byte, 1);
 
 	if (plen > 0) {
-		gw_hex_line("SmartGateway->Client", gw_tx_frame, (size_t)plen);
+		gw_hex_line("SmartGateway->Server", gw_tx_frame, (size_t)plen);
 		if (gw_send_all(cfd, gw_tx_frame, (size_t)plen, "rs232cfg") != 0) {
 			printf("[GW] 0x81 RS232-CFG 응답 전송 실패\n");
 		}
 	}
+}
+
+static int gw_build_response82_tx(uint8_t seq, const uint8_t *rs_resp, uint16_t rs_len)
+{
+	if (rs_len > GW_BODY_CAP || (rs_len > 0U && rs_resp == NULL)) {
+		return -EINVAL;
+	}
+
+	uint16_t body_len = (uint16_t)(GW_TIME_WIRE_LEN + rs_len);
+	size_t need = GW_TX_HDR_LEN + body_len + GW_TX_TAIL_LEN;
+
+	if (sizeof(gw_tx_frame) < need) {
+		return -ENOMEM;
+	}
+
+	gw_tx_frame[0] = GW_STX;
+	sys_put_be16(body_len, gw_tx_frame + 1);
+	gw_tx_frame[3] = GW_MSG_RESPONSE;
+	gw_tx_frame[4] = seq;
+	time_encode_now_9(gw_tx_frame + GW_TX_HDR_LEN);
+	if (rs_len > 0U) {
+		memcpy(gw_tx_frame + GW_TX_HDR_LEN + GW_TIME_WIRE_LEN, rs_resp, rs_len);
+	}
+	gw_tx_frame[GW_TX_HDR_LEN + body_len] = GW_ETX;
+	return (int)need;
 }
 
 static bool gw_process_frames_handshake(int cfd, uint8_t *rbuf, size_t *rlen)
@@ -443,8 +440,6 @@ static bool gw_process_frames_handshake(int cfd, uint8_t *rbuf, size_t *rlen)
 		uint8_t msg_type = rbuf[1];
 		uint8_t seq = rbuf[2];
 		const uint8_t *body = (bl > 0U) ? (rbuf + GW_SRV_RX_HDR3_LEN) : NULL;
-
-		ARG_UNUSED(seq);
 
 		gw_hex_line("SmartGateway<-Server", rbuf, need);
 		if (msg_type == GW_MSG_TIMESYNC) {
@@ -609,7 +604,7 @@ static void gw_handle_client(int cfd)
 			}
 
 			/* 0x00 TIMESYNC는 compact 포맷(②)으로도 올 수 있음:
-			 * STX(1)+MsgType(1)+Seq(1)+Body(13)+ETX(1) = 17B — Len 필드 없음 */
+			 * STX(1)+MsgType(1)+Seq(1)+Body(14)+ETX(1) = 18B — Len 필드 없음 */
 #define GW_TIMESYNC_COMPACT_LEN \
 	(GW_SRV_RX_HDR3_LEN + GW_TIMESTAMP_PAYLOAD_LEN + GW_SRV_RX_TAIL_LEN)
 			if (rbuf[1] == GW_MSG_TIMESYNC &&
@@ -670,44 +665,14 @@ static void gw_handle_client(int cfd)
 
 			gw_hex_line("SmartGateway<-Server", rbuf, need);
 
-			/*
-			 * TIMESYNC에서 설정된 프로토콜이 Modbus ASCII(0x02)이면
-			 * Body 구조: [COMNum(1B)] + [ASCII 프레임: ':' ... '\r\n']
-			 * COM 포트 번호를 분리해 해당 포트로 ASCII 프레임 전송,
-			 * 응답 앞에 COM 포트 번호를 다시 붙여 반환.
-			 * RTU(0x01) 등 다른 프로토콜은 기존 Body 그대로 처리.
-			 */
-			bool ascii_pt = (rs232_get_protocol(0) == 0x02U && bl >= 2U);
-
-			uint8_t  use_port  = ascii_pt ? body[0] : 0U;
-			const uint8_t *use_body = ascii_pt ? (body + 1U) : body;
-			uint16_t use_bl    = ascii_pt ? (uint16_t)(bl - 1U) : bl;
-
-			/* ASCII 패스스루 응답은 gw_mb_resp[1]부터 채움 → [0]에 COM 포트 예약 */
-			uint8_t  *resp_buf = ascii_pt ? (gw_mb_resp + 1U) : gw_mb_resp;
-			size_t    resp_cap = ascii_pt ? (sizeof(gw_mb_resp) - 1U) : sizeof(gw_mb_resp);
-
-			if (ascii_pt) {
-				printf("[GW] ASCII passthrough: COM%u frame %u B\n",
-				       use_port, use_bl);
-			}
-
 			size_t mb_len = 0;
-			int mbr = rs232_modbus_txrx(use_port, use_body, use_bl,
-						    resp_buf, resp_cap, &mb_len);
-
-			if (ascii_pt && mbr == 0) {
-				/* 응답 앞에 COM 포트 번호 삽입 */
-				gw_mb_resp[0] = use_port;
-				mb_len += 1U;
-			}
+			int mbr = rs232_modbus_txrx(GW_RS232_DATA_PORT, body, bl,
+						    gw_mb_resp, sizeof(gw_mb_resp), &mb_len);
 
 			if (mbr != 0) {
-				printf("[GW] RS-232 fail ret=%d rx_len=%u -> 0x82 Err=0x%02x Body 0\n", mbr,
-				       (unsigned)mb_len, GW_ERR_RS232_TIMEOUT);
-				int olen = gw_build_tx_frame(gw_tx_frame, sizeof(gw_tx_frame),
-							     GW_MSG_RESPONSE, seq, NULL, 0,
-							     GW_ERR_RS232_TIMEOUT);
+				printf("[GW] UART%u RS-232 fail ret=%d rx_len=%u -> 0x82 time only\n",
+				       (unsigned)GW_RS232_DATA_PORT, mbr, (unsigned)mb_len);
+				int olen = gw_build_response82_tx(seq, NULL, 0);
 
 				if (olen > 0) {
 					gw_hex_line("SmartGateway->Server", gw_tx_frame, (size_t)olen);
@@ -715,15 +680,11 @@ static void gw_handle_client(int cfd)
 						printf("[GW] SmartGateway->Server err response send fail\n");
 					}
 				} else {
-					printf("[GW] gw_build_tx_frame(err) fail olen=%d\n", olen);
+					printf("[GW] gw_build_response82_tx(err) fail olen=%d\n", olen);
 				}
 			} else {
-				if (!ascii_pt) {
-					gw_print_modbus_fc03_like(gw_mb_resp, mb_len);
-				}
-				int olen = gw_build_tx_frame(gw_tx_frame, sizeof(gw_tx_frame),
-							     GW_MSG_RESPONSE, seq, gw_mb_resp,
-							     (uint16_t)mb_len, 0);
+				gw_print_modbus_fc03_like(gw_mb_resp, mb_len);
+				int olen = gw_build_response82_tx(seq, gw_mb_resp, (uint16_t)mb_len);
 
 				if (olen > 0) {
 					gw_hex_line("SmartGateway->Server", gw_tx_frame, (size_t)olen);
@@ -731,7 +692,7 @@ static void gw_handle_client(int cfd)
 						printf("[GW] SmartGateway->Server ok response send fail\n");
 					}
 				} else {
-					printf("[GW] gw_build_tx_frame(ok) fail olen=%d mb_len=%u cap=%zu\n",
+					printf("[GW] gw_build_response82_tx(ok) fail olen=%d mb_len=%u cap=%zu\n",
 					       olen, (unsigned)mb_len, sizeof(gw_tx_frame));
 				}
 			}

@@ -20,6 +20,7 @@ static struct k_spinlock tl_lock;
 
 static bool wall_synced;
 static uint64_t sync_unix_sec;
+static uint16_t sync_msec;
 static int64_t sync_uptime_ms;
 
 static void seconds_to_datetime(uint32_t sec, datetime_t *dt)
@@ -71,11 +72,12 @@ static void seconds_to_datetime(uint32_t sec, datetime_t *dt)
 
 void time_sync_from_tcp_timesync_body(const uint8_t *body, size_t body_len)
 {
-	if (!body || body_len < 7U) {
+	if (!body || body_len < 9U) {
 		return;
 	}
 
 	uint16_t year = sys_get_be16(body);
+	uint16_t msec = sys_get_be16(body + 7);
 	struct tm tm = { 0 };
 
 	tm.tm_year = (int)year - 1900;
@@ -96,24 +98,26 @@ void time_sync_from_tcp_timesync_body(const uint8_t *body, size_t body_len)
 
 	wall_synced = true;
 	sync_unix_sec = (uint64_t)tu;
+	sync_msec = (msec <= 999U) ? msec : 0U;
 	sync_uptime_ms = k_uptime_get();
 	k_spin_unlock(&tl_lock, key);
 
-	printf("[TIME] TCP 시각동기 적용: %04u-%02u-%02u %02u:%02u:%02u UTC (unix %llu)\n",
+	printf("[TIME] TCP 시각동기 적용: %04u-%02u-%02u %02u:%02u:%02u.%03u UTC (unix %llu)\n",
 	       (unsigned)year, (unsigned)body[2], (unsigned)body[3], (unsigned)body[4],
-	       (unsigned)body[5], (unsigned)body[6], (unsigned long long)(uint64_t)tu);
+	       (unsigned)body[5], (unsigned)body[6], (unsigned)sync_msec,
+	       (unsigned long long)(uint64_t)tu);
 }
 
-void get_datetime(datetime_t *dt)
+static void get_now_unix_ms(uint64_t *unix_sec_out, uint16_t *msec_out)
 {
-	if (!dt) {
+	if (!unix_sec_out || !msec_out) {
 		return;
 	}
-	memset(dt, 0, sizeof(*dt));
 
 	k_spinlock_key_t key = k_spin_lock(&tl_lock);
 	bool synced = wall_synced;
 	uint64_t base_unix = sync_unix_sec;
+	uint16_t base_ms = sync_msec;
 	int64_t base_up = sync_uptime_ms;
 
 	k_spin_unlock(&tl_lock, key);
@@ -125,18 +129,64 @@ void get_datetime(datetime_t *dt)
 		if (delta_ms < 0) {
 			delta_ms = 0;
 		}
-		uint64_t elapsed = (uint64_t)(delta_ms / 1000);
-		uint64_t unix_sec = base_unix + elapsed;
+		uint64_t total_ms = (uint64_t)base_ms + (uint64_t)delta_ms;
+		uint64_t unix_sec = base_unix + (total_ms / 1000U);
+		uint16_t msec = (uint16_t)(total_ms % 1000U);
 
 		if (unix_sec > 0xFFFFFFFFULL) {
 			unix_sec = 0xFFFFFFFFULL;
 		}
-		seconds_to_datetime((uint32_t)unix_sec, dt);
+		*unix_sec_out = unix_sec;
+		*msec_out = msec;
 		return;
 	}
 
-	uint32_t uptime_sec = k_uptime_get_32() / 1000U;
-	uint32_t unix_sec = BOOT_EPOCH_SEC + uptime_sec;
+	uint32_t uptime_ms = k_uptime_get_32();
 
-	seconds_to_datetime(unix_sec, dt);
+	*unix_sec_out = BOOT_EPOCH_SEC + (uptime_ms / 1000U);
+	*msec_out = (uint16_t)(uptime_ms % 1000U);
+}
+
+void get_datetime(datetime_t *dt)
+{
+	if (!dt) {
+		return;
+	}
+	memset(dt, 0, sizeof(*dt));
+
+	uint64_t unix_sec = 0;
+	uint16_t msec;
+
+	get_now_unix_ms(&unix_sec, &msec);
+	ARG_UNUSED(msec);
+
+	if (unix_sec > 0xFFFFFFFFULL) {
+		unix_sec = 0xFFFFFFFFULL;
+	}
+	seconds_to_datetime((uint32_t)unix_sec, dt);
+}
+
+void time_encode_now_9(uint8_t out[9])
+{
+	if (!out) {
+		return;
+	}
+
+	uint64_t unix_sec = 0;
+	uint16_t msec = 0;
+	datetime_t dt;
+
+	get_now_unix_ms(&unix_sec, &msec);
+	if (unix_sec > 0xFFFFFFFFULL) {
+		unix_sec = 0xFFFFFFFFULL;
+	}
+	seconds_to_datetime((uint32_t)unix_sec, &dt);
+
+	sys_put_be16(dt.year, out);
+	out[2] = dt.month;
+	out[3] = dt.day;
+	out[4] = dt.hour;
+	out[5] = dt.min;
+	out[6] = dt.sec;
+	sys_put_be16(msec, out + 7);
 }

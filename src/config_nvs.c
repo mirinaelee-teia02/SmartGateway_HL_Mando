@@ -13,7 +13,10 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/fs/nvs.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
 #include <zephyr/drivers/flash.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/console/console.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -393,16 +396,46 @@ void config_nvs_save_boot_mode(void)
 /* ── 시리얼 메뉴 헬퍼 ────────────────────────────────────────── */
 #if CFG_HAS_CONSOLE_MENU
 
+static const struct device *cfg_console_uart(void)
+{
+	const struct device *dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+
+	return device_is_ready(dev) ? dev : NULL;
+}
+
+static int cfg_poll_char(void)
+{
+	const struct device *dev = cfg_console_uart();
+	unsigned char c;
+
+	if (dev == NULL) {
+		return -ENODEV;
+	}
+
+	return uart_poll_in(dev, &c) == 0 ? (int)c : -EAGAIN;
+}
+
+static int cfg_getchar_blocking(void)
+{
+	int c;
+
+	do {
+		c = cfg_poll_char();
+		if (c < 0) {
+			k_msleep(10);
+		}
+	} while (c < 0);
+
+	return c;
+}
+
 static int read_line(char *buf, size_t size)
 {
 	size_t pos = 0;
 
 	while (pos < size - 1U) {
-		int c = console_getchar();
+		int c = cfg_getchar_blocking();
 
-		if (c < 0) {
-			continue;
-		}
 		if (c == '\r' || c == '\n') {
 			buf[pos] = '\0';
 			printf("\r\n");
@@ -778,38 +811,22 @@ static int cfg_wait_for_setup_key(void)
 	int64_t deadline = k_uptime_get() + (CFG_MENU_TRIGGER_TIMEOUT_S * 1000);
 
 	while (k_uptime_get() < deadline) {
-		int c = console_getchar();
+		int c = cfg_poll_char();
 
 		if (c >= 0) {
 			return c;
 		}
-		k_msleep(20);
+		k_msleep(10);
 	}
 	return -1;
 }
 
-static void cfg_drain_trigger_line(void)
-{
-	int idle_ms = 0;
-
-	while (idle_ms < 80) {
-		int c = console_getchar();
-
-		if (c < 0) {
-			k_msleep(10);
-			idle_ms += 10;
-			continue;
-		}
-		idle_ms = 0;
-		if (c == '\r' || c == '\n') {
-			return;
-		}
-	}
-}
-
 void config_nvs_menu(void)
 {
-	console_init();
+	if (cfg_console_uart() == NULL) {
+		printf("[CFG] console UART not ready — 설정 메뉴 건너뜀\r\n");
+		return;
+	}
 
 	printf("\r\n[CFG] %ds 안 아무 키나 누르면 UART에서 모드·코드·IP 등 직접 입력\r\n",
 	       CFG_MENU_TRIGGER_TIMEOUT_S);
@@ -822,7 +839,6 @@ void config_nvs_menu(void)
 	}
 	printf("[CFG] key received: 0x%02x — UART 설정 시작\r\n",
 	       (unsigned int)(trigger & 0xff));
-	cfg_drain_trigger_line();
 
 	uart_quick_setup_wizard();
 

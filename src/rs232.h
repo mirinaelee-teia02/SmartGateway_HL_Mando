@@ -18,11 +18,11 @@
 #define RS232_MAX_PORTS  2
 
 /**
- * 클라이언트 0x00 TIMESYNC에서 수신한 RS-232 설정 (6바이트).
- * tcp_gateway.c → rs232_reconfigure() 전달용.
+ * RS-232 설정. 서버 0x00 TIMESYNC에는 protocol 없이 5바이트만 들어오며,
+ * tcp_gateway.c가 UART1용 내부 protocol 값을 채워 rs232_reconfigure()에 전달한다.
  */
 typedef struct {
-	uint8_t protocol; /* 0x00=RS-232(미사용), 0x01=Modbus RTU, 0x02=Modbus ASCII */
+	uint8_t protocol; /* 내부용: 0x01=Modbus RTU, 0x02=Modbus ASCII */
 	uint8_t bps;      /* 0x00=9600, 0x01=115200 */
 	uint8_t data_bit; /* 0x00=7bit, 0x01=8bit */
 	uint8_t stop_bit; /* 0x00=1bit, 0x01=2bit */

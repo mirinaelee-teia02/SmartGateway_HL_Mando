@@ -9,7 +9,7 @@
 #define UDP_H
 
 /* 전송 주기 (ms). 2000 = 2초마다 전송 (조절 가능) */
-#define UDP_SEND_INTERVAL_MS 2000
+#define UDP_SEND_INTERVAL_MS 20
 
 /*
  * udp_task_start
