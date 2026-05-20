@@ -103,7 +103,7 @@ config SMARTGATEWAY_WIFI_UDP_BIND_PORT
 	range 0 65535
 	help
 	  0 보다 크면 해당 포트에 bind 하고 recvfrom 으로 수신합니다.
-	  SMARTGATEWAY_TCP_MODBUS_GATEWAY 사용 시 TCP MsgType 0x00(시각동기) 수신 전까지
+	  SMARTGATEWAY_TCP_MODBUS_GATEWAY 사용 시 TCP MsgType 0x01(SYNC) 수신 전까지
 	  UDP 수신은 하지 않습니다.
 
 config SMARTGATEWAY_UDP_TEST_MODE
@@ -218,10 +218,9 @@ config SMARTGATEWAY_TCP_MODBUS_GATEWAY
 	help
 	  외곽 CRC 없음. Header 5B + Body(최대 256) + Tail(Error+ETX).
 	  TCP_CLIENT_MODE=n 이면 보드가 listen(서버). y 이면 보드가 peer에 connect(클라이언트).
-	  연결 후 동일: MsgType 0x80(CONNECT) 본문은 장비 마스터(ASCII 문자열) +
-	  SMARTGATEWAY_TCP_CONNECT_VERSION_HEX 디코드 바이트를 HANDSHAKE_POLL_MS 주기로 송신,
-	  상대 MsgType 0x00 수신 시 핸드셰이크 완료. MsgType 0x01 Body를 RS-232 송신,
-	  응답을 0x81로 포장. RS-232 타임아웃 시 Body 0, Error 0xE3.
+	  보드(클라이언트): 0x80 CONNECT(마스터+IDX+버전)를 HANDSHAKE_POLL_MS마다 송신.
+	  서버: 0x01 SYNC(시각+RS-232). 보드: 0x81 ACK(Ret).
+	  세션: 서버 0x02 Modbus 요청 → 보드 0x82(시각+응답).
 	  RS-232 백그라운드 스레드(UDP 패스스루)는 띄우지 않습니다.
 
 config SMARTGATEWAY_TCP_CLIENT_MODE
@@ -303,7 +302,7 @@ config SMARTGATEWAY_TCP_CONNECT_VERSION_HEX
 	depends on SMARTGATEWAY_TCP_MODBUS_GATEWAY
 	help
 	  기본 020000 = 바이트 02 00 00 (예: 2.0.0). 서버 규격에 맞게 변경.
-	  최종 Body = 마스터(ASCII 바이트) || 버전(헥사 디코드).
+	  최종 Body = 마스터(ASCII, 가변) + IDX(1B) + 버전(3B, 헥사 디코드). NVS master_code 우선.
 
 config SMARTGATEWAY_TCP_MAX_BODY
 	int "외곽 프레임 Body 최대 길이 (바이트, 규격 최대 256)"

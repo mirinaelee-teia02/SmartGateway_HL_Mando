@@ -297,7 +297,7 @@ static bool try_wifi(void)
 		}
 	}
 
-	printf("[NETMGR] WiFi all %d tries failed (WiFi 모드 → NVS=이더넷, 냉 재부팅)\n",
+	printf("[NETMGR] WiFi all %d tries failed (WiFi mode -> NVS=Ethernet, cold reboot)\n",
 	       WIFI_MAX_RETRIES);
 	return false;
 }
@@ -315,7 +315,7 @@ static void wifi_connected_service_loop(void)
 	while (wifi_is_ready()) {
 		k_sleep(K_SECONDS(1));
 	}
-	printf("[NETMGR] WiFi lost → 다음 사이클에서 재시도\n");
+	printf("[NETMGR] WiFi lost -> retry next cycle\n");
 	clear_active();
 	wifi_force_disconnect();
 	k_msleep(300);
@@ -433,7 +433,7 @@ static void netmgr_task(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
 
-	printf("[NETMGR] netmgr task start (모드: NVS 0=WiFi 1=이더넷)\n");
+	printf("[NETMGR] netmgr task start (NVS mode: 0=WiFi 1=Ethernet)\n");
 
 	unsigned int cycle = 0U;
 
@@ -441,12 +441,12 @@ static void netmgr_task(void *a, void *b, void *c)
 		cycle++;
 
 #if !IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-		printf("[NETMGR] ---------- cycle %u (이더넷 전용 빌드) ----------\n", cycle);
+		printf("[NETMGR] ---------- cycle %u (Ethernet-only build) ----------\n", cycle);
 		{
 			bool ok = run_eth_phase();
 
 			if (!ok) {
-				printf("[NETMGR] 이더넷: 준비 안 됨 → %ds 후 재시도\n",
+				printf("[NETMGR] Ethernet not ready -> retry in %ds\n",
 				       NETMGR_CYCLE_RETRY_S);
 			}
 		}
@@ -458,7 +458,7 @@ static void netmgr_task(void *a, void *b, void *c)
 		uint8_t boot_mode = g_gw_config.net_boot_mode;
 
 		if (boot_mode > GW_NET_BOOT_ETH) {
-			printf("[NETMGR] net_boot_mode=%u 손상 → WiFi(0)로 처리\n",
+			printf("[NETMGR] net_boot_mode=%u invalid -> treating as WiFi(0)\n",
 			       (unsigned int)boot_mode);
 			boot_mode = GW_NET_BOOT_WIFI;
 			g_gw_config.net_boot_mode = GW_NET_BOOT_WIFI;
@@ -467,10 +467,10 @@ static void netmgr_task(void *a, void *b, void *c)
 		if (boot_mode == GW_NET_BOOT_ETH) {
 			bool ok;
 
-			printf("[NETMGR] ---------- cycle %u (이더넷 모드) ----------\n", cycle);
+			printf("[NETMGR] ---------- cycle %u (Ethernet mode) ----------\n", cycle);
 			ok = run_eth_phase();
 			if (!ok) {
-				printf("[NETMGR] 이더넷 모드: 준비 안 됨 → NVS=WiFi, 냉 재부팅\n");
+				printf("[NETMGR] Ethernet mode: not ready -> NVS=WiFi, cold reboot\n");
 				g_gw_config.net_boot_mode = GW_NET_BOOT_WIFI;
 				config_nvs_save_boot_mode();
 				sys_reboot(SYS_REBOOT_COLD);
@@ -479,12 +479,12 @@ static void netmgr_task(void *a, void *b, void *c)
 			continue;
 		}
 
-		printf("[NETMGR] ---------- cycle %u (WiFi 모드) ----------\n", cycle);
+		printf("[NETMGR] ---------- cycle %u (WiFi mode) ----------\n", cycle);
 		{
 			struct net_if *eth_pre = get_eth_iface();
 
 			if (eth_pre) {
-				printf("[NETMGR] 이더넷 admin-down 후 WiFi (%d회 시도)\n",
+				printf("[NETMGR] Ethernet admin-down, then WiFi (%d tries)\n",
 				       WIFI_MAX_RETRIES);
 				eth_force_admin_down(eth_pre);
 			}
@@ -533,7 +533,7 @@ int netmgr_start(void)
 	printf("[NETMGR] WiFi: disabled (ETH-only build)\n");
 #endif
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-	printf("[NETMGR] NVS 네트워크 모드: %u (0=WiFi 1=이더넷)\n",
+	printf("[NETMGR] NVS network mode: %u (0=WiFi 1=Ethernet)\n",
 	       (unsigned int)g_gw_config.net_boot_mode);
 #endif
 

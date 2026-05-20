@@ -8,7 +8,7 @@
  *
  * UART0(FC4): MikroBUS FC4 — P1_8=RX, P1_9=TX (콘솔 or RS-232 포트0)
  * UART1(FC5): MikroBUS J5  — P1_16=RX, P1_17=TX (RS-232 포트1)
- * ADC       : 내부 LPADC0 2ch (CH1A/CH2A, 0~1.8V) — 검증 모드
+ * ADC       : LPADC0 J4 Pin2/4 — ADC0_A0(CH0A), ADC0_B0(CH0B), adc.c 참고
  * [AD7327]  : LPSPI6(FC6) — 아래 주석 블록 참조, 추후 활성화
  */
 

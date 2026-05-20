@@ -1,6 +1,6 @@
 /*
  * Smart Gateway - 시간 헬퍼
- * TCP 0x00 본문으로 wall clock 동기 후 get_datetime에서 경과 초 반영
+ * TCP 0x01 SYNC Body 앞 9B로 wall clock 동기
  */
 
 #include "time_helper.h"
@@ -90,7 +90,7 @@ void time_sync_from_tcp_timesync_body(const uint8_t *body, size_t body_len)
 	time_t tu = timeutil_timegm(&tm);
 
 	if (tu == (time_t)-1) {
-		printf("[TIME] timeutil_timegm 실패 (서버 Body 날짜 검사)\n");
+		printf("[TIME] timeutil_timegm failed (server body date check)\n");
 		return;
 	}
 
@@ -102,7 +102,7 @@ void time_sync_from_tcp_timesync_body(const uint8_t *body, size_t body_len)
 	sync_uptime_ms = k_uptime_get();
 	k_spin_unlock(&tl_lock, key);
 
-	printf("[TIME] TCP 시각동기 적용: %04u-%02u-%02u %02u:%02u:%02u.%03u UTC (unix %llu)\n",
+	printf("[TIME] TCP time sync applied: %04u-%02u-%02u %02u:%02u:%02u.%03u UTC (unix %llu)\n",
 	       (unsigned)year, (unsigned)body[2], (unsigned)body[3], (unsigned)body[4],
 	       (unsigned)body[5], (unsigned)body[6], (unsigned)sync_msec,
 	       (unsigned long long)(uint64_t)tu);

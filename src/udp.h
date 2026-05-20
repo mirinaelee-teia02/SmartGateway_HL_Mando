@@ -8,7 +8,7 @@
 #ifndef UDP_H
 #define UDP_H
 
-/* 전송 주기 (ms). 2000 = 2초마다 전송 (조절 가능) */
+/* 전송 주기 (ms) — ADC 2ms 샘플·2s min/max와 독립, 최신 스냅샷을 20ms마다 전송 */
 #define UDP_SEND_INTERVAL_MS 20
 
 /*

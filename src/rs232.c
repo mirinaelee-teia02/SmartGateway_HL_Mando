@@ -8,6 +8,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/spinlock.h>
 #include <zephyr/drivers/uart.h>
@@ -246,7 +247,7 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 		case 0x00: baud = 9600;   break;
 		case 0x01: baud = 115200; break;
 		default:
-			printf("[RS232] reconfigure: 알 수 없는 BPS 0x%02x\n", cfg->bps);
+			printf("[RS232] reconfigure: unknown BPS 0x%02x\n", cfg->bps);
 			return -1;
 	}
 
@@ -257,7 +258,7 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 		case 0x00: data_bits = UART_CFG_DATA_BITS_7; break;
 		case 0x01: data_bits = UART_CFG_DATA_BITS_8; break;
 		default:
-			printf("[RS232] reconfigure: 알 수 없는 DataBit 0x%02x\n", cfg->data_bit);
+			printf("[RS232] reconfigure: unknown data bits 0x%02x\n", cfg->data_bit);
 			return -1;
 	}
 
@@ -268,7 +269,7 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 		case 0x00: stop_bits = UART_CFG_STOP_BITS_1; break;
 		case 0x01: stop_bits = UART_CFG_STOP_BITS_2; break;
 		default:
-			printf("[RS232] reconfigure: 알 수 없는 StopBit 0x%02x\n", cfg->stop_bit);
+			printf("[RS232] reconfigure: unknown stop bits 0x%02x\n", cfg->stop_bit);
 			return -1;
 	}
 
@@ -280,7 +281,7 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 		case 0x01: parity = UART_CFG_PARITY_ODD;  break;
 		case 0x02: parity = UART_CFG_PARITY_EVEN; break;
 		default:
-			printf("[RS232] reconfigure: 알 수 없는 Parity 0x%02x\n", cfg->parity);
+			printf("[RS232] reconfigure: unknown parity 0x%02x\n", cfg->parity);
 			return -1;
 	}
 
@@ -291,11 +292,11 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 		case 0x00: flow_ctrl = UART_CFG_FLOW_CTRL_NONE;     break;
 		case 0x01: flow_ctrl = UART_CFG_FLOW_CTRL_RTS_CTS;  break;
 		default:
-			printf("[RS232] reconfigure: 알 수 없는 Flow 0x%02x\n", cfg->flow);
+			printf("[RS232] reconfigure: unknown flow control 0x%02x\n", cfg->flow);
 			return -1;
 	}
 
-	const char *proto_str = (cfg->protocol == 0x00) ? "RS232(미사용)" :
+	const char *proto_str = (cfg->protocol == 0x00) ? "RS232(unused)" :
 							(cfg->protocol == 0x01) ? "Modbus-RTU" :
 							(cfg->protocol == 0x02) ? "Modbus-ASCII" : "Unknown";
 	struct uart_config ucfg = {
@@ -306,7 +307,7 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 		.flow_ctrl = (uint8_t)flow_ctrl,
 	};
 
-	printf("[RS232] reconfigure 시도: %s %u baud, data=%d, stop=%d, parity=%d, flow=%d\n",
+	printf("[RS232] reconfigure attempt: %s %u baud, data=%d, stop=%d, parity=%d, flow=%d\n",
 	       proto_str, baud, (int)cfg->data_bit, (int)cfg->stop_bit,
 	       (int)cfg->parity, (int)cfg->flow);
 
@@ -318,7 +319,7 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 
 			while (k_uptime_get() < deadline) {
 				if (rs232_abort_flag) {
-					printf("[RS232] reconfigure: abort 신호 — 중단\n");
+					printf("[RS232] reconfigure: abort signal — stopped\n");
 					return -1;
 				}
 				k_msleep(100);
@@ -335,14 +336,14 @@ int rs232_reconfigure(uint8_t port_id, const rs232_remote_cfg_t *cfg)
 #endif
 			rs232_uart_clear_errors(dev, false);
 			rs232_protocol[port_id] = cfg->protocol; /* 프로토콜 저장 */
-			printf("[RS232] reconfigure 성공 (시도 %d) — protocol=%s\n",
+			printf("[RS232] reconfigure OK (attempt %d) — protocol=%s\n",
 			       attempt, proto_str);
 			return 0;
 		}
-		printf("[RS232] reconfigure 시도 %d 실패: ret=%d\n", attempt, ret);
+		printf("[RS232] reconfigure attempt %d failed: ret=%d\n", attempt, ret);
 	}
 
-	printf("[RS232] reconfigure 3회 전체 실패 — NG\n");
+	printf("[RS232] reconfigure failed after 3 attempts — NG\n");
 	return -1;
 }
 
@@ -355,7 +356,7 @@ static void rs232_ports_init(void)
 	}
 	/* 테스트 모드(DEBUG_CONSOLE=y): UART0 = 콘솔 → 포트 0 RS-232 초기화 건너뜀 */
 #if !defined(CONFIG_SMARTGATEWAY_DEBUG_CONSOLE)
-#if DT_NODE_EXISTS(RS232_0_NODE)
+#if DT_NODE_EXISTS(RS232_0_NODE) && !DT_SAME_NODE(RS232_0_NODE, DT_CHOSEN(zephyr_console))
 	dev_by_port[0] = DEVICE_DT_GET(RS232_0_NODE);
 #endif
 #endif /* !CONFIG_SMARTGATEWAY_DEBUG_CONSOLE */
@@ -495,6 +496,7 @@ static void rs232_mb_hex_line(const char *tag, const uint8_t *d, size_t len)
 /**
  * Modbus RTU 응답 예상 총 바이트 (마지막 2바이트가 CRC16). 파싱 불가 시 -1.
  * FC 01/02/03/04 정상: 1+1+1+bc(데이터)+2(CRC) = 5+bc. 예외 응답: 5. FC 05/06/16: 8.
+ * buf[0]·buf[1]이 요청 슬레이브·FC와 일치할 때만 신뢰 (에코/오프셋 오인 방지).
  */
 static int rs232_modbus_expected_resp_len(const uint8_t *buf, size_t n)
 {
@@ -531,6 +533,122 @@ static int rs232_modbus_expected_resp_len(const uint8_t *buf, size_t n)
 	default:
 		return -1;
 	}
+}
+
+/** 요청 ADU로 응답 길이 예측 (수신 중 오프셋 틀어짐 방지). */
+static int rs232_modbus_expected_resp_len_from_req(const uint8_t *req, size_t req_len)
+{
+	if (req == NULL || req_len < 2U) {
+		return -1;
+	}
+
+	uint8_t fc = req[1];
+
+	if ((fc & 0x80U) != 0U) {
+		return -1;
+	}
+
+	switch (fc) {
+	case 0x01:
+	case 0x02:
+		if (req_len < 8U) {
+			return -1;
+		}
+		{
+			unsigned qty = sys_get_be16(&req[4]);
+
+			if (qty < 1U || qty > 2000U) {
+				return -1;
+			}
+			return (int)(5U + ((qty + 7U) / 8U));
+		}
+	case 0x03:
+	case 0x04:
+		/* PDU 6B (no CRC) or RTU 8B (with CRC) from TCP body */
+		if (req_len < 6U) {
+			return -1;
+		}
+		{
+			unsigned qty = sys_get_be16(&req[4]);
+
+			if (qty < 1U || qty > 125U) {
+				return -1;
+			}
+			return (int)(5U + (qty * 2U));
+		}
+	case 0x05:
+	case 0x06:
+	case 0x10:
+		return 8;
+	default:
+		return -1;
+	}
+}
+
+/*
+ * Modbus RTU 게이트웨이: CRC 검증 없음 — 서버↔시험기 바이트 그대로 전달.
+ * 수신 길이만 요청 FC/qty 로 자르고, 에코(요청 8B) 뒤 응답은 마지막 addr+FC 정렬.
+ */
+static int rs232_modbus_align_pass_through(const uint8_t *req, size_t req_len, uint8_t *buf,
+					   size_t *nlen)
+{
+	size_t len = *nlen;
+	int expected;
+	size_t align_at = SIZE_MAX;
+
+	if (req == NULL || buf == NULL || len < 2U) {
+		return -1;
+	}
+
+	expected = rs232_modbus_expected_resp_len_from_req(req, req_len);
+
+	if (expected > 0 && len == (size_t)expected * 2U &&
+	    memcmp(buf, buf + (size_t)expected, (size_t)expected) == 0) {
+		len = (size_t)expected;
+	}
+
+	if (expected > 0) {
+		for (size_t i = 0; i + (size_t)expected <= len; i++) {
+			uint8_t fc = buf[i + 1U];
+
+			if (buf[i] != req[0]) {
+				continue;
+			}
+			if (fc != req[1] && fc != (uint8_t)(req[1] | 0x80U)) {
+				continue;
+			}
+			align_at = i;
+		}
+		if (align_at != SIZE_MAX) {
+			if (align_at > 0U) {
+				memmove(buf, buf + align_at, len - align_at);
+			}
+			*nlen = (size_t)expected;
+			return 0;
+		}
+		if (len >= (size_t)expected) {
+			*nlen = (size_t)expected;
+			return 0;
+		}
+		return -1;
+	}
+
+	/* 예외 응답(5B) 등 길이 미상: 슬레이브+exception FC 만 맞추면 5B 전달 */
+	for (size_t i = 0; i + 5U <= len; i++) {
+		if (buf[i] == req[0] && (buf[i + 1U] & 0x80U) != 0U) {
+			align_at = i;
+		}
+	}
+	if (align_at != SIZE_MAX) {
+		if (align_at > 0U) {
+			memmove(buf, buf + align_at, len - align_at);
+		}
+		*nlen = 5U;
+		return 0;
+	}
+
+	*nlen = len;
+	return 0;
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -595,6 +713,15 @@ static uint16_t rs232_crc16(const uint8_t *data, size_t len)
 		}
 	}
 	return crc;
+}
+
+static int rs232_modbus_finalize_response(const uint8_t *req, size_t req_len, uint8_t *resp,
+					  size_t *n)
+{
+	if (rs232_modbus_align_pass_through(req, req_len, resp, n) == 0) {
+		return 0;
+	}
+	return -EIO;
 }
 
 /**
@@ -896,7 +1023,7 @@ int rs232_modbus_txrx(uint8_t port_id, const uint8_t *req, size_t req_len, uint8
 	/* 프로토콜 디스패치 */
 	if (rs232_protocol[port_id] == 0x00U) {
 		/* RS-232 미사용 모드 — Modbus 요청 처리 불가 */
-		printf("[RS232] port %u: 프로토콜 미설정(0x00) — txrx 거부\n", port_id);
+		printf("[RS232] port %u: protocol unset (0x00) — txrx denied\n", port_id);
 		return -ENOTSUP;
 	}
 	if (rs232_protocol[port_id] == 0x02U) {
@@ -917,7 +1044,7 @@ int rs232_modbus_txrx(uint8_t port_id, const uint8_t *req, size_t req_len, uint8
 	 */
 	rs232_prepare_tx_bus(dev, 100U, 800U);
 
-	rs232_mb_hex_line("UART TX", req, req_len);
+	/* rs232_mb_hex_line("UART TX", req, req_len); */
 
 	/*
 	 * TX 동안 RX IRQ가 켜져 있으면 RS-485 되먹임·에코가 링/HW에 들어와
@@ -956,6 +1083,7 @@ int rs232_modbus_txrx(uint8_t port_id, const uint8_t *req, size_t req_len, uint8
 	if (CONFIG_SMARTGATEWAY_RS232_MODBUS_POST_TX_DELAY_MS > 0) {
 		k_msleep(CONFIG_SMARTGATEWAY_RS232_MODBUS_POST_TX_DELAY_MS);
 	}
+	/* TX 직후 discard 금지 — 빠른 슬레이브 응답을 15ms drain 이 삭제해 rx_len=0 유발 */
 
 	size_t max_rx = resp_cap;
 
@@ -974,7 +1102,7 @@ int rs232_modbus_txrx(uint8_t port_id, const uint8_t *req, size_t req_len, uint8
 	const int64_t t0 = k_uptime_get();
 	const int64_t deadline = t0 + RS232_MODBUS_RX_TMO_MS;
 	int64_t next_err_poll = t0 + 3000;
-	int expected_incl_crc = -1;
+	int expected_incl_crc = rs232_modbus_expected_resp_len_from_req(req, req_len);
 	int64_t t_first_rx = 0;
 
 	rs232_uart_clear_errors(dev, true);
@@ -1003,16 +1131,12 @@ int rs232_modbus_txrx(uint8_t port_id, const uint8_t *req, size_t req_len, uint8
 
 		while (rs232_rx_try_byte(dev, &ch) == 0 && n < max_rx) {
 			resp[n++] = ch;
-			if (n >= 2U) {
-				expected_incl_crc = rs232_modbus_expected_resp_len(resp, n);
-			}
-			if (expected_incl_crc > 0 && (int)n >= expected_incl_crc) {
-				goto rx_done;
-			}
 		}
 
-		expected_incl_crc = rs232_modbus_expected_resp_len(resp, n);
 		if (expected_incl_crc > 0 && (int)n >= expected_incl_crc) {
+			break;
+		}
+		if (expected_incl_crc <= 0 && n >= 5U) {
 			break;
 		}
 
@@ -1027,40 +1151,46 @@ int rs232_modbus_txrx(uint8_t port_id, const uint8_t *req, size_t req_len, uint8
 			*resp_len_out = n;
 			return -ECANCELED;
 		}
-		if (expected_incl_crc > 0 && (int)n < expected_incl_crc && n > 0 && t_first_rx > 0 &&
-		    (k_uptime_get() - t_first_rx) < 25) {
+		/*
+		 * IRQ 링 사용 시 busy-wait 금지 — tcp_gw와 ADC가 같은/근접 prio일 때
+		 * CPU 독점으로 2ms ADC 세마포어가 쌓임.
+		 */
+#if defined(CONFIG_UART_INTERRUPT_DRIVEN) && CONFIG_UART_INTERRUPT_DRIVEN
+		if (expected_incl_crc > 0 && (int)n < expected_incl_crc && n > 0) {
+			k_usleep(200);
+		} else {
+			k_msleep(1);
+		}
+#else
+		if (expected_incl_crc > 0 && (int)n < expected_incl_crc && n > 0 &&
+		    t_first_rx > 0 && (k_uptime_get() - t_first_rx) < 25) {
 			k_busy_wait(50);
 		} else {
 			k_msleep(1);
 		}
+#endif
 	}
 
 rx_done:
-	*resp_len_out = n;
-
 	/* 항상 수신 결과 덤프: 미수신(0B)·불완전·정상 모두 동일 태그로 확인 가능 */
 	if (n == 0) {
-		rs232_mb_hex_line("UART RX", resp, 0);
+		/* rs232_mb_hex_line("UART RX", resp, 0); */
 		printf("[RS232] RX timeout after %lld ms (no bytes)\n",
 		       (long long)(k_uptime_get() - t0));
 		rs232_drain_rx_fifo(dev);
 		return -ETIMEDOUT;
 	}
 
-	rs232_mb_hex_line("UART RX", resp, n);
+	/* rs232_mb_hex_line("UART RX", resp, n); */
 
-	if (expected_incl_crc > 0 && (int)n < expected_incl_crc) {
-		printf("[RS232] RX incomplete %u/%d B (expected incl. CRC) → -EIO\n", (unsigned)n,
+	if (rs232_modbus_finalize_response(req, req_len, resp, &n) != 0) {
+		printf("[RS232] RX short %u B (want %d) — dump:\n", (unsigned)n,
 		       expected_incl_crc);
+		rs232_mb_hex_line("UART RX", resp, n);
 		rs232_drain_rx_fifo(dev);
 		return -EIO;
 	}
-	/* 예외 응답 최소 5B; 정상 FC는 보통 5B 이상. 그보다 짧으면 불완전으로 본다 */
-	if (expected_incl_crc <= 0 && n < 5) {
-		printf("[RS232] RX too short for Modbus RTU (%u B, len unknown) → -EIO\n", (unsigned)n);
-		rs232_drain_rx_fifo(dev);
-		return -EIO;
-	}
+	*resp_len_out = n;
 
 	/* 성공 직후 FIFO 찌꺼기만 제거(있을 때만 짧은 무음 대기) */
 	{
@@ -1085,7 +1215,7 @@ int rs232_task_start(void)
 	rs232_print_uart_kconfig();
 
 #if defined(CONFIG_SMARTGATEWAY_DEBUG_CONSOLE)
-	printf("[RS232] 테스트 모드: UART0(P1_8/P1_9) = 콘솔(COM6), RS-232 포트 0 비활성\n");
+	printf("[RS232] test mode: UART0(P1_8/P1_9) = console, RS-232 port 0 disabled\n");
 #endif
 
 	static const char *const port_label[RS232_MAX_PORTS] = {

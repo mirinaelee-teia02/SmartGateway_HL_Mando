@@ -83,12 +83,15 @@
 
 ## 5. MsgType 정의
 
-| 값 | 이름 | 방향(개념) | 설명 |
-|----|------|------------|------|
-| `0x80` | CONNECT | 보드 → 상대 | 접속/버전 통지. Body는 고정 4바이트 `02 00 00 01` (코멘트: HL-Mando Ver 2.0.0.1). |
-| `0x00` | TIMESYNC | 상대 → 보드 | 시각 동기 Body + **UDP 수신 게이트 해제** (`sync_gate`). |
-| `0x01` | REQUEST | 상대 → 보드 | Body 전체를 Modbus RTU로 RS-232 송신. |
-| `0x81` | RESPONSE | 보드 → 상대 | REQUEST와 **동일 Seq**, Body에 Modbus 응답 또는 에러 시 Body 0·Error `0xE3`. |
+| 값 | 이름 | 프레임 | 방향 | Body |
+|----|------|--------|------|------|
+| `0x80` | CONNECT | compact | 보드 → 서버 | 장치코드(ASCII 가변) + IDX(1) + 버전(3, 예 2.0.0) |
+| `0x01` | SYNC | compact | 서버 → 보드 | 시각(9) + RS-232(5) |
+| `0x81` | ACK | compact | 보드 → 서버 | Ret(1), `0x00`=OK |
+| `0x02` | MODBUS_REQ | Len+STX | 서버 → 보드 | Modbus RTU ADU |
+| `0x82` | MODBUS_RESP | Len+STX | 보드 → 서버 | 시각(9) + Modbus RTU 응답 |
+
+compact = `STX + MsgType + Seq + Body + ETX`. Len = `STX + Len(2BE) + MsgType + Seq + Body + ETX`.
 
 기타 MsgType은 로그 후 프레임만 소비(무시).
 
@@ -103,19 +106,15 @@
 1. **0x80 프레임** 조립 후 `send` (전체 전송은 `gw_send_all`로 부분 송신 처리).
 2. `zsock_poll(..., HANDSHAKE_POLL_MS)` 로 수신 대기.
 3. 수신 바이트를 누적 버퍼에 붙이고 `gw_process_frames_handshake`로 파싱.
-4. **MsgType `0x00`(TIMESYNC)** 가 **한 번이라도** 올바르게 파싱되면 핸드셰이크 성공, 본 루프 진입.
-5. poll 타임아웃이면 **다시 1번부터** (주기적으로 0x80 재전송).
+4. **MsgType `0x01`(SYNC)** compact 프레임이 파싱되면 RS-232 설정·`0x81` ACK 후 핸드셰이크 성공.
+5. poll 타임아웃이면 **다시 1번부터** (`HANDSHAKE_POLL_MS`, 기본 2000ms).
 
-예시 (주석 기준):
-
-- 보드 → 상대: `55 00 04 80 00 02 00 00 01 00 03`
-- 상대 → 보드: `55 00 07 00 00` + **7바이트 이상** 타임스탬프 Body + `… 00 03` 형태 (실제 7바이트는 TIMESYNC Body 규격 참고)
-
-### 6.2 TIMESYNC(0x00) Body — 시각 및 UDP 게이트
+### 6.2 SYNC(0x01) Body — 시각 및 UDP 게이트
 
 `sync_gate.c` → `time_helper.c`:
 
-- Body 길이 **최소 7바이트**이어야 의미 있음.
+- Body **14바이트**: 시각 9 + RS-232 설정 5. compact 프레임 전체 **18바이트** (헤더 3 + Body 14 + ETX 1).
+- 시각 파싱은 앞 **9바이트**만 사용.
 - `body[0..1]`: 연도 **big-endian uint16**
 - `body[2]`: 월 (1–12)
 - `body[3]`: 일  
@@ -123,15 +122,15 @@
 
 `timeutil_timegm`으로 UTC epoch로 바꾼 뒤 내부 벽시계 동기 플래그를 세우고, `sg_timesync_from_tcp_notify`에서 **`sg_time_ok = true`** 로 두어 **UDP 수신 허용**으로 전환합니다.
 
-`udp.c`: `CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY` 빌드에서 **TCP로 TIMESYNC 처리 전까지는 `sg_udp_rx_allowed()`가 false** 이므로, 바인드된 UDP 소켓이 있어도 **애플리케이션은 RX를 읽지 않음**(큐에 쌓일 수는 있음). TIMESYNC 후 true가 되면 기존대로 `udp_try_rx` 가능.
+`udp.c`: **TCP 0x01 SYNC 처리 전**까지 `sg_udp_rx_allowed()`는 false.
 
-### 6.3 REQUEST(0x01)
+### 6.3 MODBUS_REQ(0x02)
 
-1. Body가 비어 있으면 스킵.
-2. `rs232_modbus_txrx(0, body, body_len, gw_mb_resp, …)` — 채널 인덱스 **0**.
-3. 실패 시: MsgType `0x81`, 동일 Seq, **Body 길이 0**, Error **`0xE3`** (`GW_ERR_RS232_TIMEOUT`).
-4. 성공 시: MsgType `0x81`, 동일 Seq, Body = 수신한 Modbus RTU, Error `0x`.
-5. 연속 0x01 처리 시 UART 부하 완화를 위해 응답 전송 후 **`k_msleep(10)`**.
+1. Len 프레임으로 수신. Body가 비어 있으면 스킵.
+2. `rs232_modbus_txrx(1, …)` — UART1(FC5).
+3. 실패 시: MsgType `0x82`, Body = 시각(9)만.
+4. 성공 시: MsgType `0x82`, Body = 시각(9) + Modbus RTU 응답.
+5. 응답 전송 후 **`k_msleep(10)`** (연속 트랜잭션 부하 완화).
 
 ---
 

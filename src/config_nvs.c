@@ -122,7 +122,7 @@ static void nvs_init_fs(void)
 	}
 #else
 	nvs_ok = false;
-	printf("[CFG] NVS 비활성 빌드 — 기본값 모드\n");
+	printf("[CFG] NVS disabled in build — using Kconfig defaults only\n");
 #endif
 }
 
@@ -266,7 +266,7 @@ void config_nvs_load(void)
 	nvs_init_fs();
 
 	if (!nvs_ok) {
-		printf("[CFG] NVS 없음 — Kconfig 기본값 사용\n");
+		printf("[CFG] NVS not available — using Kconfig defaults\n");
 		return;
 	}
 
@@ -274,7 +274,7 @@ void config_nvs_load(void)
 	uint16_t stored_ver = 0;
 	nvs_rd_u16(KEY_SCHEMA_VER, &stored_ver);
 	if (stored_ver != NVS_SCHEMA_VERSION) {
-		printf("[CFG] NVS 스키마 버전 불일치 (저장=%u, 현재=%u) — 기본값 사용, NVS 갱신\n",
+		printf("[CFG] NVS schema mismatch (stored=%u, current=%u) — defaults, NVS reset\n",
 		       stored_ver, NVS_SCHEMA_VERSION);
 #if CFG_HAS_NVS
 		/* 구버전 키 전체 삭제 */
@@ -319,13 +319,13 @@ void config_nvs_load(void)
 	if (nvs_ok && g_gw_config.net_boot_mode != GW_NET_BOOT_ETH) {
 		g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
 		config_nvs_save_boot_mode();
-		printf("[CFG] FORCE_ETH_BOOT: net_boot_mode -> ETH, NVS 저장됨\n");
+		printf("[CFG] FORCE_ETH_BOOT: net_boot_mode -> ETH, saved to NVS\n");
 	}
 #elif IS_ENABLED(CONFIG_SMARTGATEWAY_FORCE_WIFI_BOOT_MODE) && IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 	if (nvs_ok && g_gw_config.net_boot_mode != GW_NET_BOOT_WIFI) {
 		g_gw_config.net_boot_mode = GW_NET_BOOT_WIFI;
 		config_nvs_save_boot_mode();
-		printf("[CFG] FORCE_WIFI_BOOT: net_boot_mode -> WiFi, NVS 저장됨\n");
+		printf("[CFG] FORCE_WIFI_BOOT: net_boot_mode -> WiFi, saved to NVS\n");
 	}
 #endif
 
@@ -335,7 +335,7 @@ void config_nvs_load(void)
 void config_nvs_save(void)
 {
 	if (!nvs_ok) {
-		printf("[CFG] NVS 초기화 안됨 — 저장 불가\n");
+		printf("[CFG] NVS not initialized — save skipped\n");
 		return;
 	}
 
@@ -369,7 +369,7 @@ void config_nvs_save(void)
 #undef WS
 #undef WU
 
-	printf("[CFG] NVS 저장 완료\n");
+	printf("[CFG] NVS save OK\n");
 #endif
 }
 
@@ -377,7 +377,7 @@ void config_nvs_save_boot_mode(void)
 {
 #if CFG_HAS_NVS
 	if (!nvs_ok) {
-		printf("[CFG] NVS 초기화 안됨 — 부팅 모드 저장 생략\n");
+		printf("[CFG] NVS not initialized — boot mode save skipped\n");
 		return;
 	}
 
@@ -389,7 +389,7 @@ void config_nvs_save_boot_mode(void)
 
 		(void)nvs_write(&nvs, KEY_SCHEMA_VER, &schema_v, sizeof(schema_v));
 	}
-	printf("[CFG] NVS net_boot_mode=%u 저장 (다음 부팅부터 적용)\n", m);
+	printf("[CFG] NVS net_boot_mode=%u saved (next boot)\n", m);
 #endif
 }
 
@@ -402,6 +402,8 @@ static const struct device *cfg_console_uart(void)
 
 	return device_is_ready(dev) ? dev : NULL;
 }
+
+static int cfg_rx_pushback = -1;
 
 static int cfg_poll_char(void)
 {
@@ -419,6 +421,12 @@ static int cfg_getchar_blocking(void)
 {
 	int c;
 
+	if (cfg_rx_pushback >= 0) {
+		c = cfg_rx_pushback;
+		cfg_rx_pushback = -1;
+		return c;
+	}
+
 	do {
 		c = cfg_poll_char();
 		if (c < 0) {
@@ -429,6 +437,28 @@ static int cfg_getchar_blocking(void)
 	return c;
 }
 
+static void cfg_drain_crlf_tail(void)
+{
+	int c;
+
+	k_msleep(5);
+	while ((c = cfg_poll_char()) >= 0) {
+		if (c != '\r' && c != '\n') {
+			cfg_rx_pushback = c;
+			return;
+		}
+	}
+}
+
+static void cfg_drain_rx_fifo(void)
+{
+	int c;
+
+	while ((c = cfg_poll_char()) >= 0) {
+	}
+	cfg_rx_pushback = -1;
+}
+
 static int read_line(char *buf, size_t size)
 {
 	size_t pos = 0;
@@ -437,20 +467,22 @@ static int read_line(char *buf, size_t size)
 		int c = cfg_getchar_blocking();
 
 		if (c == '\r' || c == '\n') {
+			if (c == '\r') {
+				cfg_drain_crlf_tail();
+			}
 			buf[pos] = '\0';
 			printf("\r\n");
 			return (int)pos;
 		}
 		if ((c == 0x08 || c == 0x7F) && pos > 0) {
 			pos--;
-			printf("\b \b");
 			continue;
 		}
 		if (c < 0x20) {
 			continue;
 		}
+		/* No firmware echo — use terminal local echo to avoid double characters */
 		buf[pos++] = (char)c;
-		printf("%c", c);
 	}
 	buf[pos] = '\0';
 	return (int)pos;
@@ -482,11 +514,11 @@ static const char *cfg_net_mode_line(void)
 {
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 	if (g_gw_config.net_boot_mode == GW_NET_BOOT_ETH) {
-		return "이더넷(1) — RJ45 프로파일만 사용";
+		return "Ethernet(1) — RJ45 profile";
 	}
-	return "WiFi(0) — 무선 프로파일만 사용";
+	return "WiFi(0) — wireless profile";
 #else
-	return "이더넷만 (WiFi 빌드 아님)";
+	return "Ethernet only (no WiFi in build)";
 #endif
 }
 
@@ -494,128 +526,52 @@ static void print_config(void)
 {
 	printf("\r\n");
 	printf("==============================\r\n");
-	printf(" SmartGateway NVS 설정\r\n");
+	printf(" SmartGateway NVS Setup\r\n");
 	printf("==============================\r\n");
-	printf(" 목적: 장치코드·인덱스·WiFi/ETH 주소·분할 모드를 플래시에 저장,\r\n");
-	printf("       S 저장 후 재부팅하면 선택 모드(WiFi 또는 이더넷)로 동작.\r\n");
-	printf(" [분할 부팅] 재부팅 후 사용할 스택 선택\r\n");
-	printf("  현재 선택: %s\r\n", cfg_net_mode_line());
-	printf("  N) 모드 숫자 입력 (0=WiFi  1=이더넷)\r\n");
+	printf(" Pick item key, enter new value, S=save to flash.\r\n");
+	printf(" [Boot mode] stack used on next boot\r\n");
+	printf("  Current: %s\r\n", cfg_net_mode_line());
+	printf("  N) Set mode (0=WiFi  1=Ethernet)\r\n");
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-	printf("  W) 빠름: 다음 부팅 WiFi(0)\r\n");
-	printf("  L) 빠름: 다음 부팅 이더넷(1) — 아래 E 와 구분\r\n");
+	printf("  W) Quick: next boot WiFi(0)\r\n");
+	printf("  L) Quick: next boot Ethernet(1)\r\n");
 #endif
 	printf("\r\n");
-	printf(" 1) 장치 마스터 코드    : %s\r\n", g_gw_config.master_code);
-	printf(" I) 장치 인덱스 (NVS 예약, UDP 무관, 0~65535): %u\r\n",
-	       (unsigned)g_gw_config.device_index);
+	printf(" 1) Device master code   : %s\r\n", g_gw_config.master_code);
+	printf(" I) Device index (0~65535): %u\r\n", (unsigned)g_gw_config.device_index);
 
-	printf("\r\n --- 이더넷 프로파일 (모드=1) ---\r\n");
-	printf("     보드 10.108.x / PC 10.108.x 기본 권장\r\n");
-	printf(" 2) ETH 보드 IP          : %s\r\n", g_gw_config.eth_ip);
-	printf(" 3) ETH 마스크           : %s\r\n", g_gw_config.eth_netmask);
-	printf(" 4) ETH 게이트웨이       : %s\r\n", g_gw_config.eth_gw);
+	printf("\r\n --- Ethernet profile (mode=1) ---\r\n");
+	printf(" 2) ETH board IP         : %s\r\n", g_gw_config.eth_ip);
+	printf(" 3) ETH netmask          : %s\r\n", g_gw_config.eth_netmask);
+	printf(" 4) ETH gateway          : %s\r\n", g_gw_config.eth_gw);
 	printf(" 5) ETH PC TCP IP        : %s\r\n", g_gw_config.eth_tcp_server_ip);
-	printf(" 6) ETH TCP 포트         : %u\r\n", g_gw_config.eth_tcp_server_port);
+	printf(" 6) ETH TCP port         : %u\r\n", g_gw_config.eth_tcp_server_port);
 	printf(" 7) ETH PC UDP IP        : %s\r\n", g_gw_config.eth_udp_server_ip);
-	printf(" 8) ETH UDP 포트         : %u\r\n", g_gw_config.eth_udp_server_port);
+	printf(" 8) ETH UDP port         : %u\r\n", g_gw_config.eth_udp_server_port);
 
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-	printf("\r\n --- WiFi 프로파일 (모드=0) ---\r\n");
-	printf("     보드 192.168.88.x / PC 동일 대역 기본 권장\r\n");
+	printf("\r\n --- WiFi profile (mode=0) ---\r\n");
 	printf(" 9) WiFi SSID            : %s\r\n", g_gw_config.wifi_ssid);
-	printf(" A) WiFi 비밀번호        : %s\r\n", g_gw_config.wifi_psk);
-	printf(" B) WiFi 보드 IP         : %s\r\n", g_gw_config.wifi_ip);
-	printf(" C) WiFi 마스크          : %s\r\n", g_gw_config.wifi_netmask);
-	printf(" D) WiFi 게이트웨이      : %s\r\n", g_gw_config.wifi_gw);
+	printf(" A) WiFi password        : %s\r\n", g_gw_config.wifi_psk);
+	printf(" B) WiFi board IP        : %s\r\n", g_gw_config.wifi_ip);
+	printf(" C) WiFi netmask         : %s\r\n", g_gw_config.wifi_netmask);
+	printf(" D) WiFi gateway         : %s\r\n", g_gw_config.wifi_gw);
 	printf(" E) WiFi PC TCP IP       : %s\r\n", g_gw_config.wifi_tcp_server_ip);
-	printf(" F) WiFi TCP 포트        : %u\r\n", g_gw_config.wifi_tcp_server_port);
+	printf(" F) WiFi TCP port        : %u\r\n", g_gw_config.wifi_tcp_server_port);
 	printf(" G) WiFi PC UDP IP       : %s\r\n", g_gw_config.wifi_udp_server_ip);
-	printf(" H) WiFi UDP 포트        : %u\r\n", g_gw_config.wifi_udp_server_port);
+	printf(" H) WiFi UDP port        : %u\r\n", g_gw_config.wifi_udp_server_port);
 #else
-	printf("\r\n [WiFi 프로파일: 이 빌드에 비활성]\r\n");
+	printf("\r\n [WiFi profile disabled in this build]\r\n");
 #endif
 	printf("------------------------------\r\n");
-	printf(" R) Kconfig 초기값 복원 + NVS 삭제\r\n");
-	printf(" S) NVS 저장 후 부팅 계속\r\n");
-	printf(" Q) 저장 없이 부팅 계속\r\n");
+	printf(" R) Restore Kconfig defaults + erase NVS\r\n");
+	printf(" S) Save NVS and continue boot\r\n");
+	printf(" Q) Continue without saving\r\n");
 	printf("==============================\r\n");
-	printf(" 키 입력: ");
+	printf(" Item key + Enter (S=save  Q=quit): ");
 }
 
-/** 장치코드·IP 등 문자열 — 빈 줄이면 유지 */
-static void uart_prompt_str_keep(const char *label, char *dst, size_t dst_sz)
-{
-	char buf[72];
-
-	printf("%s [%s]: ", label, dst);
-	read_line(buf, sizeof(buf));
-	if (buf[0] != '\0') {
-		strncpy(dst, buf, dst_sz - 1);
-		dst[dst_sz - 1] = '\0';
-	}
-}
-
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-static void uart_prompt_net_mode_keep(void)
-{
-	char buf[72];
-
-	printf("분할 모드 (0=WiFi  1=이더넷) [%u]: ",
-	       (unsigned)g_gw_config.net_boot_mode);
-	read_line(buf, sizeof(buf));
-	if (buf[0] == '0') {
-		g_gw_config.net_boot_mode = GW_NET_BOOT_WIFI;
-	} else if (buf[0] == '1') {
-		g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
-	}
-}
-#endif
-
-/**
- * 부팅 후 UART로 한 줄씩 직접 입력 (Enter 만 = 유지).
- * PC TCP/UDP 피어 등은 M(상세 메뉴).
- */
-static void uart_quick_setup_wizard(void)
-{
-	char buf[72];
-	uint16_t u;
-
-	printf("\r\n======== UART 설정 (직접 입력) ========\r\n");
-	printf("각 항목: 새 값 후 Enter / 유지는 Enter 만\r\n\r\n");
-
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-	uart_prompt_net_mode_keep();
-#else
-	printf("[INFO] WiFi 비활성 빌드 — 분할 모드=이더넷만\r\n");
-	g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
-#endif
-
-	uart_prompt_str_keep("장치코드", g_gw_config.master_code, sizeof(g_gw_config.master_code));
-
-	printf("인덱스 (0~65535, NVS 예약) [%u]: ", (unsigned)g_gw_config.device_index);
-	read_line(buf, sizeof(buf));
-	if (buf[0] != '\0' && parse_port(buf, &u)) {
-		g_gw_config.device_index = u;
-	}
-
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-	uart_prompt_str_keep("WiFi SSID", g_gw_config.wifi_ssid, sizeof(g_gw_config.wifi_ssid));
-	uart_prompt_str_keep("WiFi 비밀번호(PSK)", g_gw_config.wifi_psk, sizeof(g_gw_config.wifi_psk));
-	uart_prompt_str_keep("WiFi 보드 IP", g_gw_config.wifi_ip, sizeof(g_gw_config.wifi_ip));
-	uart_prompt_str_keep("WiFi 마스크", g_gw_config.wifi_netmask, sizeof(g_gw_config.wifi_netmask));
-	uart_prompt_str_keep("WiFi 게이트웨이", g_gw_config.wifi_gw, sizeof(g_gw_config.wifi_gw));
-#endif
-
-	uart_prompt_str_keep("이더넷 보드 IP", g_gw_config.eth_ip, sizeof(g_gw_config.eth_ip));
-	uart_prompt_str_keep("이더넷 마스크", g_gw_config.eth_netmask, sizeof(g_gw_config.eth_netmask));
-	uart_prompt_str_keep("이더넷 게이트웨이", g_gw_config.eth_gw, sizeof(g_gw_config.eth_gw));
-
-	printf("\r\n — PC TCP·UDP 피어·포트는 아래 M(상세)에서 —\r\n");
-	printf("========================================\r\n");
-}
-
-/** 문자 단축키 메뉴 (상세): 피어·포트·복원 등. true = NVS 저장됨(부팅 계속). */
+/** List menu: pick item to edit. true = saved and continue boot. */
 static bool cfg_menu_letter_loop(void)
 {
 	char buf[72];
@@ -634,7 +590,7 @@ static bool cfg_menu_letter_loop(void)
 		}
 
 		if (sel == 'Q') {
-			printf("[CFG] 상세 메뉴 종료 (저장 안 함)\r\n");
+			printf("[CFG] Continue boot without save\r\n");
 			return false;
 		}
 		if (sel == 'S') {
@@ -643,26 +599,26 @@ static bool cfg_menu_letter_loop(void)
 		}
 		if (sel == 'R') {
 			cfg_reset_to_defaults(true);
-			printf("[CFG] 초기값 복원 완료\r\n");
+			printf("[CFG] Defaults restored\r\n");
 			continue;
 		}
 		if (sel == 'N') {
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-			printf(" 다음 부팅 모드 (0=WiFi  1=이더넷): ");
+			printf(" Next boot mode (0=WiFi  1=Ethernet): ");
 #else
-			printf(" 이더넷만 가능 (1 입력): ");
+			printf(" Ethernet only build (enter 1): ");
 #endif
 			read_line(buf, sizeof(buf));
 			if (buf[0] >= '0' && buf[0] <= '1') {
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 				g_gw_config.net_boot_mode = (uint8_t)(buf[0] - '0');
-				printf(" → 설정됨: %s (S 로 플래시 저장)\r\n", cfg_net_mode_line());
+				printf(" -> %s (press S to save)\r\n", cfg_net_mode_line());
 #else
 				g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
-				printf(" [!] WiFi 비활성 빌드 → 이더넷(1)\r\n");
+				printf(" [!] WiFi disabled build -> Ethernet(1)\r\n");
 #endif
 			} else {
-				printf(" [!] 0 또는 1\r\n");
+				printf(" [!] Enter 0 or 1\r\n");
 			}
 			continue;
 		}
@@ -670,22 +626,17 @@ static bool cfg_menu_letter_loop(void)
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 		if (sel == 'W') {
 			g_gw_config.net_boot_mode = GW_NET_BOOT_WIFI;
-			printf(" → 다음 부팅 WiFi(0). 저장은 S\r\n");
+			printf(" -> Next boot WiFi(0). Press S to save\r\n");
 			continue;
 		}
 		if (sel == 'L') {
 			g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
-			printf(" → 다음 부팅 이더넷(1). 저장은 S\r\n");
-			continue;
-		}
-		if (sel == 'E' && buf[1] == '\0') {
-			g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
-			printf(" → 다음 부팅 이더넷(1). 저장은 S (단축키는 L 권장)\r\n");
+			printf(" -> Next boot Ethernet(1). Press S to save\r\n");
 			continue;
 		}
 #endif
 
-		printf(" 새 값 입력 (Enter = 변경 없음): ");
+		printf(" New value (Enter = keep): ");
 		read_line(buf, sizeof(buf));
 		if (buf[0] == '\0') {
 			continue;
@@ -703,7 +654,7 @@ static bool cfg_menu_letter_loop(void)
 			if (parse_port(buf, &port)) {
 				g_gw_config.device_index = port;
 			} else {
-				printf(" [!] 0~65535 숫자\r\n");
+				printf(" [!] Enter 0~65535\r\n");
 			}
 			break;
 		case '2':
@@ -728,7 +679,7 @@ static bool cfg_menu_letter_loop(void)
 			if (parse_port(buf, &port)) {
 				g_gw_config.eth_tcp_server_port = port;
 			} else {
-				printf(" [!] 잘못된 포트\r\n");
+				printf(" [!] Invalid port\r\n");
 			}
 			break;
 		case '7':
@@ -740,7 +691,7 @@ static bool cfg_menu_letter_loop(void)
 			if (parse_port(buf, &port)) {
 				g_gw_config.eth_udp_server_port = port;
 			} else {
-				printf(" [!] 잘못된 포트\r\n");
+				printf(" [!] Invalid port\r\n");
 			}
 			break;
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
@@ -778,7 +729,7 @@ static bool cfg_menu_letter_loop(void)
 			if (parse_port(buf, &port)) {
 				g_gw_config.wifi_tcp_server_port = port;
 			} else {
-				printf(" [!] 잘못된 포트\r\n");
+				printf(" [!] Invalid port\r\n");
 			}
 			break;
 		case 'G':
@@ -790,17 +741,17 @@ static bool cfg_menu_letter_loop(void)
 			if (parse_port(buf, &port)) {
 				g_gw_config.wifi_udp_server_port = port;
 			} else {
-				printf(" [!] 잘못된 포트\r\n");
+				printf(" [!] Invalid port\r\n");
 			}
 			break;
 #else
 		case '9': case 'A': case 'B': case 'C': case 'D':
 		case 'E': case 'F': case 'G': case 'H':
-			printf(" [!] WiFi 비활성 빌드 — 이 항목은 편집 불가\r\n");
+			printf(" [!] WiFi disabled — cannot edit\r\n");
 			break;
 #endif
 		default:
-			printf(" [!] 알 수 없는 항목\r\n");
+			printf(" [!] Unknown item\r\n");
 			break;
 		}
 	}
@@ -824,12 +775,13 @@ static int cfg_wait_for_setup_key(void)
 void config_nvs_menu(void)
 {
 	if (cfg_console_uart() == NULL) {
-		printf("[CFG] console UART not ready — 설정 메뉴 건너뜀\r\n");
+		printf("[CFG] console UART not ready — setup menu skipped\r\n");
 		return;
 	}
 
-	printf("\r\n[CFG] %ds 안 아무 키나 누르면 UART에서 모드·코드·IP 등 직접 입력\r\n",
+	printf("\r\n[CFG] Press any key within %ds for NVS menu (S=save)\r\n",
 	       CFG_MENU_TRIGGER_TIMEOUT_S);
+	printf("[CFG] Use terminal local echo (115200 CR/CRLF)\r\n");
 
 	int trigger = cfg_wait_for_setup_key();
 
@@ -837,50 +789,14 @@ void config_nvs_menu(void)
 		printf("[CFG] timeout — continuing with stored config\r\n");
 		return;
 	}
-	printf("[CFG] key received: 0x%02x — UART 설정 시작\r\n",
-	       (unsigned int)(trigger & 0xff));
+	cfg_drain_crlf_tail();
+	cfg_drain_rx_fifo();
 
-	uart_quick_setup_wizard();
-
-	char buf[72];
-
-	for (;;) {
-		printf("\r\n-------- 저장 / 종료 --------\r\n");
-		printf(" S) NVS 저장 후 부팅 계속\r\n");
-		printf(" Q) 저장 없이 부팅 계속\r\n");
-		printf(" M) 상세 메뉴 (PC TCP·UDP 피어·포트·단축키)\r\n");
-		printf(" 선택: ");
-		read_line(buf, sizeof(buf));
-		if (buf[0] == '\0') {
-			continue;
-		}
-
-		char sel = buf[0];
-		if (sel >= 'a' && sel <= 'z') {
-			sel = (char)(sel - 32);
-		}
-
-		if (sel == 'S') {
-			config_nvs_save();
-			break;
-		}
-		if (sel == 'Q') {
-			printf("[CFG] 저장 없이 계속\r\n");
-			break;
-		}
-		if (sel == 'M') {
-			if (cfg_menu_letter_loop()) {
-				break;
-			}
-			continue;
-		}
-
-		printf(" [!] S / Q / M 만\r\n");
-	}
+	(void)cfg_menu_letter_loop();
 }
 #else
 void config_nvs_menu(void)
 {
-	printf("[CFG] 콘솔 메뉴 비활성 빌드 — 설정 메뉴 건너뜀\n");
+	printf("[CFG] console menu disabled — setup menu skipped\n");
 }
 #endif

@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(SmartGateway)
 
-target_sources(app PRIVATE src/main.c src/adc.c src/udp.c src/msgpack_adc.c src/time_helper.c src/rs232.c src/tcp_gateway.c src/sync_gate.c)
+target_sources(app PRIVATE src/main.c src/adc.c src/udp.c src/msgpack_adc.c src/time_helper.c src/rs232.c src/tcp_gateway.c src/sync_gate.c src/gw_error.c)
 
 target_sources(app PRIVATE src/config_nvs.c src/network_manager.c)
 

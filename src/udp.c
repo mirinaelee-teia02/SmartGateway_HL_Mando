@@ -14,7 +14,7 @@
  *   4) k_msleep(UDP_SEND_INTERVAL_MS)
  *
  * TCP Modbus 게이트웨이가 켜진 빌드:
- *   TCP에서 TIMESYNC(MsgType 0x00)를 받아 sg_timesync_from_tcp_notify()가 호출되기 전
+ *   TCP에서 SYNC(MsgType 0x01)를 받아 sg_timesync_from_tcp_notify()가 호출되기 전
  *   sg_udp_allowed() == false — UDP TX(ADC MessagePack)와 udp_try_rx(RX) 모두 대기.
  *   0x00 수신 후 true: 기존과 같이 주기 송수신.
  *
@@ -26,6 +26,7 @@
 #include "udp.h"
 #include "adc.h"
 #include "msgpack_adc.h"
+#include "gw_error.h"
 #include <stdio.h>
 #include <zephyr/autoconf.h>
 #include <zephyr/kernel.h>
@@ -167,6 +168,7 @@ static void udp_task(void *p1, void *p2, void *p3)
 	udp_sock = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (udp_sock < 0) {
 		printf("[UDP] [CHECK 2] FAIL - Socket create error: %d\n", udp_sock);
+		gw_error_set(GW_ERR_UDP_COMM);
 		return;
 	}
 	printf("[UDP] [CHECK 2] OK - Socket created (fd=%d)\n", udp_sock);
@@ -179,6 +181,7 @@ static void udp_task(void *p1, void *p2, void *p3)
 	bind_sa.sin_addr.s_addr = htonl(INADDR_ANY); /* 모든 인터페이스 */
 	if (zsock_bind(udp_sock, (struct sockaddr *)&bind_sa, sizeof(bind_sa)) != 0) {
 		printf("[UDP] bind port %u FAIL\n", (unsigned)UDP_BIND_PORT);
+		gw_error_set(GW_ERR_UDP_COMM);
 		zsock_close(udp_sock);
 		return;
 	}
@@ -209,7 +212,7 @@ static void udp_task(void *p1, void *p2, void *p3)
 			static bool udp_gate_msg;
 
 			if (!udp_gate_msg) {
-				printf("[UDP] waiting for TCP TIMESYNC (0x00) — no TX/RX yet\n");
+				printf("[UDP] waiting for TCP SYNC (0x01) — no TX/RX yet\n");
 				udp_gate_msg = true;
 			}
 			k_msleep(UDP_SEND_INTERVAL_MS);
@@ -250,13 +253,16 @@ static void udp_task(void *p1, void *p2, void *p3)
 		/* sent: 실제로 나간 UDP 페이로드 바이트 수(sendto는 블로킹 계열) */
 		if (sent != len) {
 			printf("[UDP] [CHECK 6] FAIL - Send error: %zd (expected %d)\n", sent, len);
+			gw_error_set(GW_ERR_UDP_COMM);
+		} else if (gw_error_get() == GW_ERR_UDP_COMM) {
+			gw_error_clear();
 		}
 		k_msleep(UDP_SEND_INTERVAL_MS);
 	}
 }
 
 /**
- * 우선순위 4: tcp_gateway(5)보다 낮게 — Modbus/TCP 응답을 UDP 전송보다 우선.
+ * 우선순위 4: ADC(3) 다음, tcp_gateway(6)보다 높게 — Modbus/TCP가 UDP보다 우선.
  */
 int udp_task_start(void)
 {

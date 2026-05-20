@@ -1,21 +1,29 @@
 /*
- * Smart Gateway - MessagePack
+ * Smart Gateway - MessagePack UDP 페이로드
  *
- * 운영(map): line, timestamp(14자), raw/min/max
- * 테스트(array): [ device_str, timestamp(17자), float32, float32 ]
+ * 운영(UDP): DC 00 1C + 28필드 순차 (DeviceID, Timestamp, V×8, min×8, max×8, Sampling, ERROR)
+ * 테스트: fixarray 4 — [ device, timestamp(17), ch0, ch1 ]
  */
 
 #include "msgpack_adc.h"
+#include "gw_error.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <zephyr/sys/byteorder.h>
 
-#define MSGPACK_FIXMAP(n)    (0x80U | ((n) & 0x0f))
 #define MSGPACK_FIXARRAY(n)  (0x90U | ((n) & 0x0f))
-#define MSGPACK_FLOAT32      0xca
-#define MSGPACK_FIXSTR(n)    (0xa0U | ((n) & 0x1f))
-#define MSGPACK_STR8         0xd9
+#define MSGPACK_FIXSTR(n)      (0xa0U | ((n) & 0x1f))
+#define MSGPACK_FLOAT32        0xcaU
+#define MSGPACK_UINT8          0xccU
+#define MSGPACK_STR8           0xd9U
+/* 규격 헤더: 0xDC 0x00 0x1C — 필드 개수 28 (MessagePack map16 형식 코드) */
+#define UDP_MSGPACK_HDR0       0xdcU
+#define UDP_MSGPACK_HDR_CNT_HI 0x00U
+#define UDP_MSGPACK_HDR_CNT_LO 0x1cU
+#define UDP_MSGPACK_FIELD_CNT  28U
+#define UDP_MSGPACK_CH_FIELDS  8U
+#define UDP_TS_WIRE_LEN        17U
 
 static inline void write_float32_be(uint8_t *p, float f)
 {
@@ -26,7 +34,6 @@ static inline void write_float32_be(uint8_t *p, float f)
 	memcpy(p, &u, 4);
 }
 
-/* UDP float32: 소수 둘째 자리로 반올림 후 인코딩 (표시/파서 일치용) */
 static inline float float32_round_2decimals(float x)
 {
 	double d = (double)x * 100.0;
@@ -40,81 +47,23 @@ static inline float float32_round_2decimals(float x)
 	return (float)((double)n / 100.0);
 }
 
-static int encode_map_kv(uint8_t **pp, size_t *remain, const char *key, size_t klen,
-			 const char *val, size_t vlen)
-{
-	uint8_t *p = *pp;
-	size_t r = *remain;
-	size_t need = 1 + klen;
-
-	if (klen > 31 || vlen > 255) {
-		return -1;
-	}
-	if (vlen <= 31) {
-		need += 1 + vlen;
-	} else {
-		need += 2 + vlen;
-	}
-	if (r < need) {
-		return -1;
-	}
-
-	*p++ = MSGPACK_FIXSTR((uint8_t)klen);
-	memcpy(p, key, klen);
-	p += klen;
-
-	if (vlen <= 31) {
-		*p++ = MSGPACK_FIXSTR((uint8_t)vlen);
-	} else {
-		*p++ = MSGPACK_STR8;
-		*p++ = (uint8_t)vlen;
-	}
-	memcpy(p, val, vlen);
-	p += vlen;
-
-	*pp = p;
-	*remain = r - need;
-	return 0;
-}
-
-static int encode_map_str(uint8_t **pp, size_t *remain, const char *key, const char *val)
-{
-	return encode_map_kv(pp, remain, key, strlen(key), val, strlen(val));
-}
-
-static size_t line_or_device_id_len(const char *val)
+static size_t device_id_wire_len(const char *val)
 {
 	size_t n = 0;
 
 	while (n < ADC_LINE_MAX_LEN && val[n] != '\0') {
 		n++;
 	}
-	return (n > ADC_LINE_ID_MAX_CHARS) ? ADC_LINE_ID_MAX_CHARS : n;
-}
-
-/* line / DeviveID: 최대 ADC_LINE_ID_MAX_CHARS */
-static int encode_map_line_or_device_id(uint8_t **pp, size_t *remain, const char *key,
-					const char *val)
-{
-	return encode_map_kv(pp, remain, key, strlen(key), val, line_or_device_id_len(val));
-}
-
-/* yyyyMMddHHmmss — 14자, 밀리초 없음 (운영 map용) */
-static int fmt_timestamp_str(char *out, size_t out_sz, const adc_snapshot_t *snap)
-{
-	int n = snprintf(out, out_sz, "%04u%02u%02u%02u%02u%02u",
-			 (unsigned)snap->datetime.year, (unsigned)snap->datetime.month,
-			 (unsigned)snap->datetime.day, (unsigned)snap->datetime.hour,
-			 (unsigned)snap->datetime.min, (unsigned)snap->datetime.sec);
-
-	if (n != 14 || (size_t)n >= out_sz) {
-		return -1;
+	if (n > ADC_LINE_ID_MAX_CHARS) {
+		n = ADC_LINE_ID_MAX_CHARS;
 	}
-	return 0;
+	if (n > 255U) {
+		n = 255U;
+	}
+	return n;
 }
 
-/* yyyyMMddHHmmssfff — 17자 (테스트 array 2번째 요소) */
-static int fmt_timestamp_str_test(char *out, size_t out_sz, const adc_snapshot_t *snap)
+static int fmt_timestamp_udp17(char *out, size_t out_sz, const adc_snapshot_t *snap)
 {
 	int n = snprintf(out, out_sz, "%04u%02u%02u%02u%02u%02u%03u",
 			 (unsigned)snap->datetime.year, (unsigned)snap->datetime.month,
@@ -122,14 +71,13 @@ static int fmt_timestamp_str_test(char *out, size_t out_sz, const adc_snapshot_t
 			 (unsigned)snap->datetime.min, (unsigned)snap->datetime.sec,
 			 (unsigned)snap->msec);
 
-	if (n != 17 || (size_t)n >= out_sz) {
+	if (n != (int)UDP_TS_WIRE_LEN || (size_t)n >= out_sz) {
 		return -1;
 	}
 	return 0;
 }
 
-/* map 키 없이 MessagePack str 한 개만 출력 (배열 요소용) */
-static int append_msgpack_str(uint8_t **pp, size_t *remain, const char *s, size_t slen)
+static int append_fixstr(uint8_t **pp, size_t *remain, const char *s, size_t slen)
 {
 	uint8_t *p = *pp;
 	size_t r = *remain;
@@ -139,9 +87,9 @@ static int append_msgpack_str(uint8_t **pp, size_t *remain, const char *s, size_
 		return -1;
 	}
 	if (slen <= 31U) {
-		need = 1 + slen;
+		need = 1U + slen;
 	} else {
-		need = 2 + slen;
+		need = 2U + slen;
 	}
 	if (r < need) {
 		return -1;
@@ -159,29 +107,124 @@ static int append_msgpack_str(uint8_t **pp, size_t *remain, const char *s, size_
 	return 0;
 }
 
-static int encode_map_array_f32(uint8_t **pp, size_t *remain, const char *key,
-				const float *arr, uint8_t n)
+static int append_float32(uint8_t **pp, size_t *remain, float v)
 {
 	uint8_t *p = *pp;
-	size_t r = *remain;
-	size_t klen = strlen(key);
-	size_t need = 1 + klen + 1 + n * 5;
 
-	if (r < need) {
+	if (*remain < 5U) {
+		return -1;
+	}
+	*p++ = MSGPACK_FLOAT32;
+	write_float32_be(p, float32_round_2decimals(v));
+	p += 4U;
+	*pp = p;
+	*remain -= 5U;
+	return 0;
+}
+
+static int append_uint8(uint8_t **pp, size_t *remain, uint8_t v)
+{
+	uint8_t *p = *pp;
+
+	if (*remain < 2U) {
+		return -1;
+	}
+	*p++ = MSGPACK_UINT8;
+	*p++ = v;
+	*pp = p;
+	*remain -= 2U;
+	return 0;
+}
+
+static float channel_volts(const adc_snapshot_t *snap, const float *arr, uint8_t ch)
+{
+	if (ch < snap->ch_count) {
+		return arr[ch];
+	}
+	return 0.0f;
+}
+
+int msgpack_encode_adc_snapshot(const adc_snapshot_t *snap, uint8_t *buf, size_t buf_len)
+{
+	char ts[20];
+	size_t id_len;
+	uint8_t sampling_u8;
+	uint8_t err_code;
+
+	if (!snap || !buf || snap->ch_count == 0 || snap->ch_count > ADC_MAX_CHANNELS) {
 		return -1;
 	}
 
-	*p++ = MSGPACK_FIXSTR((uint8_t)klen);
-	memcpy(p, key, klen);
-	p += klen;
-	*p++ = MSGPACK_FIXARRAY(n);
-	for (uint8_t i = 0; i < n; i++) {
-		*p++ = MSGPACK_FLOAT32;
-		write_float32_be(p, float32_round_2decimals(arr[i]));
-		p += 4;
+	id_len = device_id_wire_len(snap->line);
+	if (fmt_timestamp_udp17(ts, sizeof(ts), snap) != 0) {
+		return -1;
 	}
-	*pp = p;
-	*remain = r - need;
+
+	sampling_u8 = (snap->sample_count > 255U) ? 255U : (uint8_t)snap->sample_count;
+	err_code = gw_error_get();
+
+	/* 헤더 3 + str + str + 24×float + 2×uint8 */
+	size_t need = 3U + (id_len <= 31U ? 1U + id_len : 2U + id_len) +
+		      (1U + UDP_TS_WIRE_LEN) + (24U * 5U) + (2U * 2U);
+
+	if (buf_len < need) {
+		return -1;
+	}
+
+	uint8_t *p = buf;
+	size_t remain = buf_len;
+
+	*p++ = UDP_MSGPACK_HDR0;
+	*p++ = UDP_MSGPACK_HDR_CNT_HI;
+	*p++ = UDP_MSGPACK_HDR_CNT_LO;
+	remain -= 3U;
+
+	if (append_fixstr(&p, &remain, snap->line, id_len) != 0) {
+		return -1;
+	}
+	if (append_fixstr(&p, &remain, ts, UDP_TS_WIRE_LEN) != 0) {
+		return -1;
+	}
+
+	for (uint8_t i = 0; i < UDP_MSGPACK_CH_FIELDS; i++) {
+		if (append_float32(&p, &remain, channel_volts(snap, snap->raw, i)) != 0) {
+			return -1;
+		}
+	}
+	for (uint8_t i = 0; i < UDP_MSGPACK_CH_FIELDS; i++) {
+		if (append_float32(&p, &remain, channel_volts(snap, snap->min_val, i)) != 0) {
+			return -1;
+		}
+	}
+	for (uint8_t i = 0; i < UDP_MSGPACK_CH_FIELDS; i++) {
+		if (append_float32(&p, &remain, channel_volts(snap, snap->max_val, i)) != 0) {
+			return -1;
+		}
+	}
+	if (append_uint8(&p, &remain, sampling_u8) != 0) {
+		return -1;
+	}
+	if (append_uint8(&p, &remain, err_code) != 0) {
+		return -1;
+	}
+
+	ARG_UNUSED(UDP_MSGPACK_FIELD_CNT);
+	return (int)(p - buf);
+}
+
+/* ── 테스트 모드: fixarray 4 (2ch) ───────────────────────────────────── */
+
+static int fmt_timestamp_str_test(char *out, size_t out_sz, const adc_snapshot_t *snap)
+{
+	int n = snprintf(out, out_sz, "%04u%02u%02u%02u%02u%02u%03u",
+			 (unsigned)snap->datetime.year, (unsigned)snap->datetime.month,
+			 (unsigned)snap->datetime.day, (unsigned)snap->datetime.hour,
+			 (unsigned)snap->datetime.min, (unsigned)snap->datetime.sec,
+			 (unsigned)snap->msec);
+
+	if (n != 17 || (size_t)n >= out_sz) {
+		return -1;
+	}
 	return 0;
 }
 
@@ -192,7 +235,7 @@ int msgpack_encode_adc_test_2ch(const adc_snapshot_t *snap, uint8_t *buf, size_t
 	}
 
 	char ts[20];
-	size_t id_len = line_or_device_id_len(snap->line);
+	size_t id_len = device_id_wire_len(snap->line);
 
 	if (fmt_timestamp_str_test(ts, sizeof(ts), snap) != 0) {
 		return -1;
@@ -200,7 +243,6 @@ int msgpack_encode_adc_test_2ch(const adc_snapshot_t *snap, uint8_t *buf, size_t
 
 	uint8_t *p = buf;
 	size_t remain = buf_len;
-	/* fixarray 4 + str + str + float32 + float32 */
 	size_t need = 1U + (id_len <= 31U ? 1U + id_len : 2U + id_len) +
 		      (17U <= 31U ? 1U + 17U : 2U + 17U) + 5U + 5U;
 
@@ -211,10 +253,10 @@ int msgpack_encode_adc_test_2ch(const adc_snapshot_t *snap, uint8_t *buf, size_t
 	*p++ = MSGPACK_FIXARRAY(4);
 	remain--;
 
-	if (append_msgpack_str(&p, &remain, snap->line, id_len) != 0) {
+	if (append_fixstr(&p, &remain, snap->line, id_len) != 0) {
 		return -1;
 	}
-	if (append_msgpack_str(&p, &remain, ts, 17U) != 0) {
+	if (append_fixstr(&p, &remain, ts, 17U) != 0) {
 		return -1;
 	}
 	if (remain < 10U) {
@@ -226,47 +268,6 @@ int msgpack_encode_adc_test_2ch(const adc_snapshot_t *snap, uint8_t *buf, size_t
 	*p++ = MSGPACK_FLOAT32;
 	write_float32_be(p, float32_round_2decimals(snap->raw[1]));
 	p += 4;
-
-	return (int)(p - buf);
-}
-
-int msgpack_encode_adc_snapshot(const adc_snapshot_t *snap, uint8_t *buf, size_t buf_len)
-{
-	if (!snap || !buf || snap->ch_count == 0 || snap->ch_count > ADC_MAX_CHANNELS) {
-		return -1;
-	}
-
-	char ts[16];
-
-	if (fmt_timestamp_str(ts, sizeof(ts), snap) != 0) {
-		return -1;
-	}
-
-	uint8_t *p = buf;
-	size_t remain = buf_len;
-	uint8_t n = snap->ch_count;
-
-	if (remain < 1) {
-		return -1;
-	}
-	*p++ = MSGPACK_FIXMAP(5);
-	remain--;
-
-	if (encode_map_line_or_device_id(&p, &remain, "line", snap->line) != 0) {
-		return -1;
-	}
-	if (encode_map_str(&p, &remain, "timestamp", ts) != 0) {
-		return -1;
-	}
-	if (encode_map_array_f32(&p, &remain, "raw", snap->raw, n) != 0) {
-		return -1;
-	}
-	if (encode_map_array_f32(&p, &remain, "min", snap->min_val, n) != 0) {
-		return -1;
-	}
-	if (encode_map_array_f32(&p, &remain, "max", snap->max_val, n) != 0) {
-		return -1;
-	}
 
 	return (int)(p - buf);
 }

@@ -31,11 +31,12 @@ typedef struct {
 	uint8_t  sec;    /* 0~59 */
 } datetime_t;
 
-/* ADC 스냅샷 (2초 주기 전송용) */
+/* ADC 스냅샷 — 2ms 샘플, 2s min/max 윈도우, UDP는 20ms마다 최신 raw+min/max 전송 */
 typedef struct {
 	char       line[ADC_LINE_MAX_LEN];       /* 라인 ID 문자열, NUL 종료 (NVS master_code와 동기) */
 	datetime_t datetime;                     /* 전송 시각 (초) */
-	uint16_t   msec;                         /* 로컬 보관용(UDP 타임스탬프 문자열에는 미사용) */
+	uint16_t   msec;                         /* UDP 타임스탬프 17자(밀리초 3자)용 */
+	uint16_t   sample_count;                 /* since last UDP TX (~20ms / 2ms ≈ 10) */
 	float      raw[ADC_MAX_CHANNELS];        /* 최신 샘플 전압 (V, 0~Vref) */
 	float      min_val[ADC_MAX_CHANNELS];    /* 2초 윈도우 최소 전압 (V) */
 	float      max_val[ADC_MAX_CHANNELS];    /* 2초 윈도우 최대 전압 (V) */
@@ -46,7 +47,7 @@ typedef struct {
  * adc_task_start
  *
  * ADC 샘플링을 수행하는 전용 스레드를 생성하고 시작합니다.
- * 스레드는 2ms마다 ADC 값을 읽고, 공유 스냅샷을 갱신합니다.
+ * k_timer(2ms)로 ADC를 읽고, 매 샘플 공유 스냅샷(raw·min·max)을 갱신합니다.
  *
  */
 int adc_task_start(void);

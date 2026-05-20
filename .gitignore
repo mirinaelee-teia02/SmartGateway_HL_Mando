@@ -3,6 +3,7 @@ debug/
 build/
 build_check/
 build_verify/
+build_netmgr_wifi_ram/
 
 # 로그 / 임시
 *.log
@@ -19,4 +20,5 @@ __repo__
 CMakeFiles/
 cmake_install.cmake
 SmartGateway_HLMando/
+SmartGateway_HL_Mando/
 .claude/

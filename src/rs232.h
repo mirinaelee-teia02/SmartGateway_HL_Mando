@@ -18,7 +18,7 @@
 #define RS232_MAX_PORTS  2
 
 /**
- * RS-232 설정. 서버 0x00 TIMESYNC에는 protocol 없이 5바이트만 들어오며,
+ * RS-232 설정. 서버 0x01 SYNC Body 끝 5바이트(BPS~Flow), protocol 없음 —
  * tcp_gateway.c가 UART1용 내부 protocol 값을 채워 rs232_reconfigure()에 전달한다.
  */
 typedef struct {

@@ -16,7 +16,7 @@ void sg_timesync_from_tcp_notify(const uint8_t *body, size_t body_len)
 	time_sync_from_tcp_timesync_body(body, body_len);
 
 	//if (!sg_time_ok) {
-	//	printf("[SG] TCP 시각동기(0x00) — UDP 수신 허용\n");
+	//	printf("[SG] TCP time sync (0x00) — UDP RX allowed\n");
 	//}
 	sg_time_ok = true;
 }
