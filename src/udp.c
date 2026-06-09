@@ -1,9 +1,8 @@
 /*
  * Smart Gateway — UDP 전송/수신 태스크
  *
- * 관련 Kconfig (요약):
- *   WIFI_ENABLE=y → SMARTGATEWAY_WIFI_UDP_PEER_IP / _PEER_PORT / _BIND_PORT 사용
- *   WIFI_ENABLE=n → SMARTGATEWAY_ETH_UDP_PEER_IP  / _PEER_PORT / _BIND_PORT 사용
+ * 피어 IP/포트: netmgr_udp_peer_*() — 활성 인터페이스(WiFi/ETH)에 맞는 NVS 프로파일.
+ * 바인드 포트: Kconfig ETH/WIFI_UDP_BIND_PORT 중 netmgr_active_iface() 기준.
  *   CONFIG_SMARTGATEWAY_UDP_TEST_MODE — MessagePack 페이로드 형식(테스트 2ch vs 스냅샷)
  *   CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY + sync_gate — 아래 “게이트” 동작
  *
@@ -17,25 +16,20 @@
  *   TCP에서 SYNC(MsgType 0x01)를 받아 sg_timesync_from_tcp_notify()가 호출되기 전
  *   sg_udp_allowed() == false — UDP TX(ADC MessagePack)와 udp_try_rx(RX) 모두 대기.
  *   0x00 수신 후 true: 기존과 같이 주기 송수신.
- *
- * wait_for_network / on_net_event:
- *   __attribute__((unused)) 로 컴파일 유지. 부팅 직후 IP 할당 전에 UDP 시작해야 할 때
- *   호출부에서 연결 가능(이 파일만으로는 자동 호출 안 함).
  */
 
 #include "udp.h"
 #include "adc.h"
 #include "msgpack_adc.h"
 #include "gw_error.h"
+#include "network_manager.h"
+#include "config_nvs.h"
 #include <stdio.h>
 #include <zephyr/autoconf.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/net_ip.h>
-#include <zephyr/net/net_if.h>
-#include <zephyr/net/net_event.h>
-#include <zephyr/net/net_mgmt.h>
 #include <string.h>
 
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY)
@@ -44,58 +38,74 @@
 
 #define UDP_STACK_SIZE	 2048 /* udp_task 스택 크기(바이트) */
 
-/* ── 모드별 UDP 피어·바인드 설정 자동 선택 ─────────────────────────
- *   WIFI_ENABLE=y → WiFi 인터페이스 설정 사용
- *   WIFI_ENABLE=n → 이더넷 인터페이스 설정 사용               */
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-#  define UDP_PEER_IP   CONFIG_SMARTGATEWAY_WIFI_UDP_PEER_IP
-#  define UDP_PEER_PORT CONFIG_SMARTGATEWAY_WIFI_UDP_PEER_PORT
-#  define UDP_BIND_PORT CONFIG_SMARTGATEWAY_WIFI_UDP_BIND_PORT
+#  define UDP_BIND_PORT_WIFI CONFIG_SMARTGATEWAY_WIFI_UDP_BIND_PORT
 #else
-#  define UDP_PEER_IP   CONFIG_SMARTGATEWAY_ETH_UDP_PEER_IP
-#  define UDP_PEER_PORT CONFIG_SMARTGATEWAY_ETH_UDP_PEER_PORT
-#  define UDP_BIND_PORT CONFIG_SMARTGATEWAY_ETH_UDP_BIND_PORT
+#  define UDP_BIND_PORT_WIFI 0
 #endif
+#define UDP_BIND_PORT_ETH CONFIG_SMARTGATEWAY_ETH_UDP_BIND_PORT
+
+#if (UDP_BIND_PORT_WIFI > 0) || (UDP_BIND_PORT_ETH > 0)
+#  define UDP_RX_ENABLED 1
+#endif
+
+static uint16_t udp_bind_port_active(void)
+{
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
+	if (netmgr_active_iface() == NETMGR_IFACE_WIFI) {
+		return (uint16_t)UDP_BIND_PORT_WIFI;
+	}
+#endif
+	return (uint16_t)UDP_BIND_PORT_ETH;
+}
+
+static int udp_peer_apply(struct sockaddr_in *peer)
+{
+	const char *ip = netmgr_udp_peer_ip();
+	uint16_t port = netmgr_udp_peer_port();
+
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
+	ip   = g_gw_config.server_domain;
+	port = g_gw_config.server_domain_port;
+
+	if (ip == NULL || ip[0] == '\0' || port == 0U) {
+		return -EINVAL;
+	}
+	char port_str[8];
+	struct zsock_addrinfo hints = {
+		.ai_family   = AF_INET,
+		.ai_socktype = SOCK_DGRAM,
+	};
+	struct zsock_addrinfo *res = NULL;
+
+	snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+	int gaierr = zsock_getaddrinfo(ip, port_str, &hints, &res);
+
+	if (gaierr != 0 || res == NULL) {
+		printf("[UDP] DNS resolve '%s' failed: %d\n", ip, gaierr);
+		return -EINVAL;
+	}
+	memcpy(peer, res->ai_addr, sizeof(*peer));
+	zsock_freeaddrinfo(res);
+	return 0;
+#else
+	if (ip == NULL || ip[0] == '\0' || port == 0U) {
+		return -EINVAL;
+	}
+	memset(peer, 0, sizeof(*peer));
+	peer->sin_family = AF_INET;
+	peer->sin_port = htons(port);
+	if (zsock_inet_pton(AF_INET, ip, &peer->sin_addr) != 1) {
+		return -EINVAL;
+	}
+	return 0;
+#endif
+}
 
 /* sendto 에 매번 채우는 목적지(초기화 구간에서 한 번 설정) */
 static struct sockaddr_in peer_addr;
 /* 태스크 전역 UDP fd — 다른 모듈에서 직접 쓰지 말 것(캡슐화 위반 방지) */
 static int udp_sock = -1;
-/* wait_for_network() 안에서만 의미; 폴링 루프 탈출 플래그 */
-static bool net_ready;
-
-/** IPv4 주소가 인터페이스에 붙으면 net_ready = true (콜백) */
-static void __attribute__((unused)) on_net_event(struct net_mgmt_event_callback *cb,
-						  uint64_t mgmt_event, struct net_if *f)
-{
-	ARG_UNUSED(cb); /* Zephyr 콜백 시그니처 */
-	ARG_UNUSED(f);	/* 관심 이벤트만 사용 */
-	if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) { /* IPv4 주소 할당됨 */
-		net_ready = true;
-	}
-}
-
-/**
- * 기본 인터페이스를 올린 뒤, IPv4 주소가 할당될 때까지 블록.
- * Zephyr net_mgmt 이벤트 콜백으로만 처리(소켓 connect 불필요).
- */
-static void __attribute__((unused)) wait_for_network(void)
-{
-	struct net_mgmt_event_callback mgmt_cb; /* net_mgmt 등록용 콜백 구조체 */
-
-	(void)mgmt_cb;
-	printf("[UDP] [CHECK 1] Waiting for network (IPv4 addr)...\n");
-	net_ready = false;
-	net_mgmt_init_event_callback(&mgmt_cb, on_net_event, NET_EVENT_IPV4_ADDR_ADD);
-	net_mgmt_add_event_callback(&mgmt_cb);
-	net_if_up(net_if_get_default());
-
-	while (!net_ready) {
-		k_msleep(100);
-	}
-	net_mgmt_del_event_callback(&mgmt_cb);
-	printf("[UDP] [CHECK 1] OK - Network ready (IP assigned)\n");
-}
 
 /* MessagePack 최대치에 맞춘 TX; RX 스택 버퍼(udp_try_rx 한 번 분량) */
 #define UDP_TX_BUF_SIZE  384
@@ -104,7 +114,7 @@ static void __attribute__((unused)) wait_for_network(void)
 K_THREAD_STACK_DEFINE(udp_task_stack, UDP_STACK_SIZE); /* udp_task용 스택 영역 */
 static struct k_thread udp_task_data;			 /* udp 스레드 제어 블록 */
 
-#if UDP_BIND_PORT > 0
+#if defined(UDP_RX_ENABLED)
 /**
  * bind 된 UDP 소켓에서 읽을 데이터가 있으면 recvfrom 후 앞 64바이트 hex 출력.
  * TCP 게이트웨이 + sync_gate: TIMESYNC(0x00) 전에는 RX 하지 않음.
@@ -173,34 +183,47 @@ static void udp_task(void *p1, void *p2, void *p3)
 	}
 	printf("[UDP] [CHECK 2] OK - Socket created (fd=%d)\n", udp_sock);
 
-#if UDP_BIND_PORT > 0
-	struct sockaddr_in bind_sa = { 0 }; /* 로컬 수신 주소 */
+	{
+		uint16_t bind_port = udp_bind_port_active();
 
-	bind_sa.sin_family = AF_INET;
-	bind_sa.sin_port = htons((uint16_t)UDP_BIND_PORT);
-	bind_sa.sin_addr.s_addr = htonl(INADDR_ANY); /* 모든 인터페이스 */
-	if (zsock_bind(udp_sock, (struct sockaddr *)&bind_sa, sizeof(bind_sa)) != 0) {
-		printf("[UDP] bind port %u FAIL\n", (unsigned)UDP_BIND_PORT);
+		if (bind_port > 0U) {
+			struct sockaddr_in bind_sa = { 0 }; /* 로컬 수신 주소 */
+
+			bind_sa.sin_family = AF_INET;
+			bind_sa.sin_port = htons(bind_port);
+			bind_sa.sin_addr.s_addr = htonl(INADDR_ANY);
+			if (zsock_bind(udp_sock, (struct sockaddr *)&bind_sa, sizeof(bind_sa)) != 0) {
+				printf("[UDP] bind port %u FAIL\n", (unsigned)bind_port);
+				gw_error_set(GW_ERR_UDP_COMM);
+				zsock_close(udp_sock);
+				return;
+			}
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY)
+			printf("[UDP] bind :%u (%s, TX/RX after TCP 0x00 TIMESYNC)\n",
+			       (unsigned)bind_port, netmgr_active_iface_label());
+#else
+			printf("[UDP] bind :%u (%s, RX enabled)\n",
+			       (unsigned)bind_port, netmgr_active_iface_label());
+#endif
+		}
+	}
+
+	if (udp_peer_apply(&peer_addr) != 0) {
+		printf("[UDP] peer config invalid (iface=%s)\n", netmgr_active_iface_label());
 		gw_error_set(GW_ERR_UDP_COMM);
 		zsock_close(udp_sock);
 		return;
 	}
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_TCP_MODBUS_GATEWAY)
-	printf("[UDP] bind :%u (TX/RX after TCP 0x00 TIMESYNC)\n",
-	       (unsigned)UDP_BIND_PORT);
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
+	printf("[UDP] TX target (DNS): %s:%u (%s), interval %dms\n",
+	       g_gw_config.server_domain,
+	       (unsigned)g_gw_config.server_domain_port,
+	       netmgr_active_iface_label(), UDP_SEND_INTERVAL_MS);
 #else
-	printf("[UDP] bind :%u (RX enabled)\n", (unsigned)UDP_BIND_PORT);
+	printf("[UDP] TX target: %s:%u (%s), interval %dms\n",
+	       netmgr_udp_peer_ip(), (unsigned)netmgr_udp_peer_port(),
+	       netmgr_active_iface_label(), UDP_SEND_INTERVAL_MS);
 #endif
-#endif
-
-	memset(&peer_addr, 0, sizeof(peer_addr));
-	peer_addr.sin_family = AF_INET;
-	peer_addr.sin_port = htons((uint16_t)UDP_PEER_PORT);
-	/* pton 실패 시 sin_addr=0 이 될 수 있음 — 운영에서는 PEER_IP 검증 권장 */
-	zsock_inet_pton(AF_INET, UDP_PEER_IP, &peer_addr.sin_addr);
-	printf("[UDP] TX target: %s:%d, interval %dms, test_mode=%d\n",
-	       UDP_PEER_IP, UDP_PEER_PORT,
-	       UDP_SEND_INTERVAL_MS, IS_ENABLED(CONFIG_SMARTGATEWAY_UDP_TEST_MODE));
 
 	uint8_t tx_buf[UDP_TX_BUF_SIZE]; /* MessagePack 출력 버퍼 */
 	/* ADC 샘플 미준비 연속일 때 로그만 살짝 */
@@ -220,8 +243,10 @@ static void udp_task(void *p1, void *p2, void *p3)
 		}
 #endif
 
-#if UDP_BIND_PORT > 0
-		udp_try_rx(udp_sock);
+#if defined(UDP_RX_ENABLED)
+		if (udp_bind_port_active() > 0U) {
+			udp_try_rx(udp_sock);
+		}
 #endif
 
 		adc_snapshot_t snap; /* ADC 채널 스냅샷(인코딩 원천) */
@@ -257,7 +282,14 @@ static void udp_task(void *p1, void *p2, void *p3)
 		} else if (gw_error_get() == GW_ERR_UDP_COMM) {
 			gw_error_clear();
 		}
-		k_msleep(UDP_SEND_INTERVAL_MS);
+
+		/*
+		 * k_msleep(20ms) 대신 ADC 트리거 세마포어 대기.
+		 * ADC 태스크가 정확히 ADC_UDP_SAMPLES_PER_PERIOD(10개) 샘플 후 sem_give하므로
+		 * UDP 주기가 ADC 타이머 기준으로 정렬 → 10개/11개 불규칙 문제 해소.
+		 * 타임아웃(3×주기): ADC 태스크 이상 시 무한 대기 방지.
+		 */
+		(void)k_sem_take(&adc_udp_trigger_sem, K_MSEC(UDP_SEND_INTERVAL_MS * 3));
 	}
 }
 

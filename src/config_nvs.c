@@ -37,31 +37,33 @@
 #define CFG_MENU_TRIGGER_TIMEOUT_S 15
 
 /* ── NVS 스키마 버전 (구조체 변경 시 증가 → 구버전 NVS 자동 무시) ── */
-/* 5: net_boot_mode 0/1만 (WiFi·ETH 두 모드, AUTO 제거) — 구 스키마(4 이하) 무효화 */
-#define NVS_SCHEMA_VERSION 5U
+/* 6: server_domain·server_domain_port 추가; 포트 기본값 변경(TCP 19195, UDP 19197) */
+#define NVS_SCHEMA_VERSION 6U
 #define KEY_SCHEMA_VER     0   /* key 0 */
 
 /* ── NVS 키 ──────────────────────────────────────────────────── */
-#define KEY_MASTER_CODE    1
-#define KEY_ETH_IP         2
-#define KEY_ETH_MASK       3
-#define KEY_ETH_GW         4
-#define KEY_ETH_TCP_IP     5
-#define KEY_ETH_TCP_PORT   6
-#define KEY_ETH_UDP_IP     7
-#define KEY_ETH_UDP_PORT   8
-#define KEY_WIFI_SSID      9
-#define KEY_WIFI_PSK      10
-#define KEY_WIFI_IP       11
-#define KEY_WIFI_MASK     12
-#define KEY_WIFI_GW       13
-#define KEY_WIFI_TCP_IP   14
-#define KEY_WIFI_TCP_PORT 15
-#define KEY_WIFI_UDP_IP   16
-#define KEY_WIFI_UDP_PORT 17
-#define KEY_NET_BOOT_MODE 18
-#define KEY_DEVICE_INDEX  19
-#define KEY_LAST          KEY_DEVICE_INDEX
+#define KEY_MASTER_CODE       1
+#define KEY_ETH_IP            2
+#define KEY_ETH_MASK          3
+#define KEY_ETH_GW            4
+#define KEY_ETH_TCP_IP        5
+#define KEY_ETH_TCP_PORT      6
+#define KEY_ETH_UDP_IP        7
+#define KEY_ETH_UDP_PORT      8
+#define KEY_WIFI_SSID         9
+#define KEY_WIFI_PSK         10
+#define KEY_WIFI_IP          11
+#define KEY_WIFI_MASK        12
+#define KEY_WIFI_GW          13
+#define KEY_WIFI_TCP_IP      14
+#define KEY_WIFI_TCP_PORT    15
+#define KEY_WIFI_UDP_IP      16
+#define KEY_WIFI_UDP_PORT    17
+#define KEY_NET_BOOT_MODE    18
+#define KEY_DEVICE_INDEX     19
+#define KEY_SERVER_DOMAIN    20
+#define KEY_SERVER_DOMAIN_PORT 21
+#define KEY_LAST             KEY_SERVER_DOMAIN_PORT
 
 /* ── 전역 설정 구조체 ─────────────────────────────────────────── */
 gw_config_t g_gw_config;
@@ -133,6 +135,11 @@ static void load_defaults(void)
 
 	strncpy(g_gw_config.master_code, CONFIG_SMARTGATEWAY_LINE_ID,
 		sizeof(g_gw_config.master_code) - 1);
+
+	/* 도메인 접속 프로파일 기본값 */
+	strncpy(g_gw_config.server_domain, CONFIG_SMARTGATEWAY_DNS_TEST_DOMAIN,
+		sizeof(g_gw_config.server_domain) - 1);
+	g_gw_config.server_domain_port = (uint16_t)CONFIG_SMARTGATEWAY_DNS_TEST_PORT;
 #if defined(CONFIG_SMARTGATEWAY_PROTO_DEVICE_ID)
 	g_gw_config.device_index =
 		(uint16_t)MIN((unsigned int)CONFIG_SMARTGATEWAY_PROTO_DEVICE_ID, 65535U);
@@ -306,6 +313,8 @@ void config_nvs_load(void)
 	nvs_rd_str(KEY_WIFI_UDP_IP,  g_gw_config.wifi_udp_server_ip, sizeof(g_gw_config.wifi_udp_server_ip));
 	nvs_rd_u16(KEY_WIFI_UDP_PORT,&g_gw_config.wifi_udp_server_port);
 	nvs_rd_u8_boot_mode(KEY_NET_BOOT_MODE, &g_gw_config.net_boot_mode);
+	nvs_rd_str(KEY_SERVER_DOMAIN,     g_gw_config.server_domain,     sizeof(g_gw_config.server_domain));
+	nvs_rd_u16(KEY_SERVER_DOMAIN_PORT,&g_gw_config.server_domain_port);
 
 #if !IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 	g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
@@ -365,6 +374,8 @@ void config_nvs_save(void)
 	WS(KEY_WIFI_UDP_IP,  g_gw_config.wifi_udp_server_ip);
 	WU(KEY_WIFI_UDP_PORT,g_gw_config.wifi_udp_server_port);
 	WU(KEY_NET_BOOT_MODE, g_gw_config.net_boot_mode);
+	WS(KEY_SERVER_DOMAIN,     g_gw_config.server_domain);
+	WU(KEY_SERVER_DOMAIN_PORT,g_gw_config.server_domain_port);
 
 #undef WS
 #undef WU
@@ -512,57 +523,53 @@ static bool parse_port(const char *s, uint16_t *out)
 
 static const char *cfg_net_mode_line(void)
 {
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 	if (g_gw_config.net_boot_mode == GW_NET_BOOT_ETH) {
 		return "Ethernet(1) — RJ45 profile";
 	}
 	return "WiFi(0) — wireless profile";
-#else
-	return "Ethernet only (no WiFi in build)";
-#endif
 }
 
 static void print_config(void)
 {
 	printf("\r\n");
 	printf("==============================\r\n");
-	printf(" SmartGateway NVS Setup\r\n");
+	printf(" SmartGateway Setting(IP, Port) Setup\r\n");
 	printf("==============================\r\n");
 	printf(" Pick item key, enter new value, S=save to flash.\r\n");
 	printf(" [Boot mode] stack used on next boot\r\n");
 	printf("  Current: %s\r\n", cfg_net_mode_line());
 	printf("  N) Set mode (0=WiFi  1=Ethernet)\r\n");
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 	printf("  W) Quick: next boot WiFi(0)\r\n");
 	printf("  L) Quick: next boot Ethernet(1)\r\n");
-#endif
+
 	printf("\r\n");
 	printf(" 1) Device master code   : %s\r\n", g_gw_config.master_code);
-	printf(" I) Device index (0~65535): %u\r\n", (unsigned)g_gw_config.device_index);
+	printf(" 2) Device index (0~65535): %u\r\n", (unsigned)g_gw_config.device_index);
 
 	printf("\r\n --- Ethernet profile (mode=1) ---\r\n");
-	printf(" 2) ETH board IP         : %s\r\n", g_gw_config.eth_ip);
-	printf(" 3) ETH netmask          : %s\r\n", g_gw_config.eth_netmask);
-	printf(" 4) ETH gateway          : %s\r\n", g_gw_config.eth_gw);
-	printf(" 5) ETH PC TCP IP        : %s\r\n", g_gw_config.eth_tcp_server_ip);
-	printf(" 6) ETH TCP port         : %u\r\n", g_gw_config.eth_tcp_server_port);
-	printf(" 7) ETH PC UDP IP        : %s\r\n", g_gw_config.eth_udp_server_ip);
-	printf(" 8) ETH UDP port         : %u\r\n", g_gw_config.eth_udp_server_port);
+	printf(" 3) ETH board IP         : %s\r\n", g_gw_config.eth_ip);
+	printf(" 4) ETH netmask          : %s\r\n", g_gw_config.eth_netmask);
+	printf(" 5) ETH gateway          : %s\r\n", g_gw_config.eth_gw);
+	printf(" 6) ETH PC TCP IP        : %s\r\n", g_gw_config.eth_tcp_server_ip);
+	printf(" 7) ETH TCP port         : %u\r\n", g_gw_config.eth_tcp_server_port);
+	printf(" 8) ETH PC UDP IP        : %s\r\n", g_gw_config.eth_udp_server_ip);
+	printf(" 9) ETH UDP port         : %u\r\n", g_gw_config.eth_udp_server_port);
 
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 	printf("\r\n --- WiFi profile (mode=0) ---\r\n");
-	printf(" 9) WiFi SSID            : %s\r\n", g_gw_config.wifi_ssid);
-	printf(" A) WiFi password        : %s\r\n", g_gw_config.wifi_psk);
-	printf(" B) WiFi board IP        : %s\r\n", g_gw_config.wifi_ip);
-	printf(" C) WiFi netmask         : %s\r\n", g_gw_config.wifi_netmask);
-	printf(" D) WiFi gateway         : %s\r\n", g_gw_config.wifi_gw);
-	printf(" E) WiFi PC TCP IP       : %s\r\n", g_gw_config.wifi_tcp_server_ip);
-	printf(" F) WiFi TCP port        : %u\r\n", g_gw_config.wifi_tcp_server_port);
-	printf(" G) WiFi PC UDP IP       : %s\r\n", g_gw_config.wifi_udp_server_ip);
-	printf(" H) WiFi UDP port        : %u\r\n", g_gw_config.wifi_udp_server_port);
-#else
-	printf("\r\n [WiFi profile disabled in this build]\r\n");
-#endif
+	printf(" A) WiFi SSID            : %s\r\n", g_gw_config.wifi_ssid);
+	printf(" B) WiFi password        : %s\r\n", g_gw_config.wifi_psk);
+	printf(" C) WiFi board IP        : %s\r\n", g_gw_config.wifi_ip);
+	printf(" D) WiFi netmask         : %s\r\n", g_gw_config.wifi_netmask);
+	printf(" E) WiFi gateway         : %s\r\n", g_gw_config.wifi_gw);
+	printf(" F) WiFi PC TCP IP       : %s\r\n", g_gw_config.wifi_tcp_server_ip);
+	printf(" G) WiFi TCP port        : %u\r\n", g_gw_config.wifi_tcp_server_port);
+	printf(" H) WiFi PC UDP IP       : %s\r\n", g_gw_config.wifi_udp_server_ip);
+	printf(" I) WiFi UDP port        : %u\r\n", g_gw_config.wifi_udp_server_port);
+
+	printf("\r\n --- DNS 테스트 프로파일 (DNS_TEST_MODE=y 빌드 시 사용) ---\r\n");
+	printf(" J) Server domain        : %s\r\n", g_gw_config.server_domain);
+	printf(" K) Domain port (TCP+UDP): %u\r\n", g_gw_config.server_domain_port);
+
 	printf("------------------------------\r\n");
 	printf(" R) Restore Kconfig defaults + erase NVS\r\n");
 	printf(" S) Save NVS and continue boot\r\n");
@@ -603,27 +610,16 @@ static bool cfg_menu_letter_loop(void)
 			continue;
 		}
 		if (sel == 'N') {
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 			printf(" Next boot mode (0=WiFi  1=Ethernet): ");
-#else
-			printf(" Ethernet only build (enter 1): ");
-#endif
 			read_line(buf, sizeof(buf));
 			if (buf[0] >= '0' && buf[0] <= '1') {
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 				g_gw_config.net_boot_mode = (uint8_t)(buf[0] - '0');
 				printf(" -> %s (press S to save)\r\n", cfg_net_mode_line());
-#else
-				g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
-				printf(" [!] WiFi disabled build -> Ethernet(1)\r\n");
-#endif
 			} else {
 				printf(" [!] Enter 0 or 1\r\n");
 			}
 			continue;
 		}
-
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 		if (sel == 'W') {
 			g_gw_config.net_boot_mode = GW_NET_BOOT_WIFI;
 			printf(" -> Next boot WiFi(0). Press S to save\r\n");
@@ -634,7 +630,6 @@ static bool cfg_menu_letter_loop(void)
 			printf(" -> Next boot Ethernet(1). Press S to save\r\n");
 			continue;
 		}
-#endif
 
 		printf(" New value (Enter = keep): ");
 		read_line(buf, sizeof(buf));
@@ -650,106 +645,111 @@ static bool cfg_menu_letter_loop(void)
 				sizeof(g_gw_config.master_code) - 1);
 			g_gw_config.master_code[sizeof(g_gw_config.master_code) - 1] = '\0';
 			break;
-		case 'I':
+		case '2':
 			if (parse_port(buf, &port)) {
 				g_gw_config.device_index = port;
 			} else {
 				printf(" [!] Enter 0~65535\r\n");
 			}
 			break;
-		case '2':
+		case '3':
 			strncpy(g_gw_config.eth_ip, buf, sizeof(g_gw_config.eth_ip) - 1);
 			g_gw_config.eth_ip[sizeof(g_gw_config.eth_ip) - 1] = '\0';
 			break;
-		case '3':
+		case '4':
 			strncpy(g_gw_config.eth_netmask, buf,
 				sizeof(g_gw_config.eth_netmask) - 1);
 			g_gw_config.eth_netmask[sizeof(g_gw_config.eth_netmask) - 1] = '\0';
 			break;
-		case '4':
+		case '5':
 			strncpy(g_gw_config.eth_gw, buf, sizeof(g_gw_config.eth_gw) - 1);
 			g_gw_config.eth_gw[sizeof(g_gw_config.eth_gw) - 1] = '\0';
 			break;
-		case '5':
+		case '6':
 			strncpy(g_gw_config.eth_tcp_server_ip, buf,
 				sizeof(g_gw_config.eth_tcp_server_ip) - 1);
 			g_gw_config.eth_tcp_server_ip[sizeof(g_gw_config.eth_tcp_server_ip) - 1] = '\0';
 			break;
-		case '6':
+		case '7':
 			if (parse_port(buf, &port)) {
 				g_gw_config.eth_tcp_server_port = port;
 			} else {
 				printf(" [!] Invalid port\r\n");
 			}
 			break;
-		case '7':
+		case '8':
 			strncpy(g_gw_config.eth_udp_server_ip, buf,
 				sizeof(g_gw_config.eth_udp_server_ip) - 1);
 			g_gw_config.eth_udp_server_ip[sizeof(g_gw_config.eth_udp_server_ip) - 1] = '\0';
 			break;
-		case '8':
+		case '9':
 			if (parse_port(buf, &port)) {
 				g_gw_config.eth_udp_server_port = port;
 			} else {
 				printf(" [!] Invalid port\r\n");
 			}
 			break;
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
-		case '9':
+		case 'A':
 			strncpy(g_gw_config.wifi_ssid, buf,
 				sizeof(g_gw_config.wifi_ssid) - 1);
 			g_gw_config.wifi_ssid[sizeof(g_gw_config.wifi_ssid) - 1] = '\0';
 			break;
-		case 'A':
+		case 'B':
 			strncpy(g_gw_config.wifi_psk, buf,
 				sizeof(g_gw_config.wifi_psk) - 1);
 			g_gw_config.wifi_psk[sizeof(g_gw_config.wifi_psk) - 1] = '\0';
 			break;
-		case 'B':
+		case 'C':
 			strncpy(g_gw_config.wifi_ip, buf,
 				sizeof(g_gw_config.wifi_ip) - 1);
 			g_gw_config.wifi_ip[sizeof(g_gw_config.wifi_ip) - 1] = '\0';
 			break;
-		case 'C':
+		case 'D':
 			strncpy(g_gw_config.wifi_netmask, buf,
 				sizeof(g_gw_config.wifi_netmask) - 1);
 			g_gw_config.wifi_netmask[sizeof(g_gw_config.wifi_netmask) - 1] = '\0';
 			break;
-		case 'D':
+		case 'E':
 			strncpy(g_gw_config.wifi_gw, buf,
 				sizeof(g_gw_config.wifi_gw) - 1);
 			g_gw_config.wifi_gw[sizeof(g_gw_config.wifi_gw) - 1] = '\0';
 			break;
-		case 'E':
+		case 'F':
 			strncpy(g_gw_config.wifi_tcp_server_ip, buf,
 				sizeof(g_gw_config.wifi_tcp_server_ip) - 1);
 			g_gw_config.wifi_tcp_server_ip[sizeof(g_gw_config.wifi_tcp_server_ip) - 1] = '\0';
 			break;
-		case 'F':
+		case 'G':
 			if (parse_port(buf, &port)) {
 				g_gw_config.wifi_tcp_server_port = port;
 			} else {
 				printf(" [!] Invalid port\r\n");
 			}
 			break;
-		case 'G':
+		case 'H':
 			strncpy(g_gw_config.wifi_udp_server_ip, buf,
 				sizeof(g_gw_config.wifi_udp_server_ip) - 1);
 			g_gw_config.wifi_udp_server_ip[sizeof(g_gw_config.wifi_udp_server_ip) - 1] = '\0';
 			break;
-		case 'H':
+		case 'I':
 			if (parse_port(buf, &port)) {
 				g_gw_config.wifi_udp_server_port = port;
 			} else {
 				printf(" [!] Invalid port\r\n");
 			}
 			break;
-#else
-		case '9': case 'A': case 'B': case 'C': case 'D':
-		case 'E': case 'F': case 'G': case 'H':
-			printf(" [!] WiFi disabled — cannot edit\r\n");
+		case 'J':
+			strncpy(g_gw_config.server_domain, buf,
+				sizeof(g_gw_config.server_domain) - 1);
+			g_gw_config.server_domain[sizeof(g_gw_config.server_domain) - 1] = '\0';
 			break;
-#endif
+		case 'K':
+			if (parse_port(buf, &port)) {
+				g_gw_config.server_domain_port = port;
+			} else {
+				printf(" [!] Invalid port\r\n");
+			}
+			break;
 		default:
 			printf(" [!] Unknown item\r\n");
 			break;
@@ -793,10 +793,5 @@ void config_nvs_menu(void)
 	cfg_drain_rx_fifo();
 
 	(void)cfg_menu_letter_loop();
-}
-#else
-void config_nvs_menu(void)
-{
-	printf("[CFG] console menu disabled — setup menu skipped\n");
 }
 #endif

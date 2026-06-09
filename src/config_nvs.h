@@ -19,6 +19,10 @@ typedef struct {
 	/* NVS 예약 필드(추후 프로토콜용). UDP MessagePack과는 무관 */
 	uint16_t device_index;
 
+	/* ── 도메인 접속 프로파일 (DNS 테스트 모드) ── */
+	char     server_domain[64]; /* 도메인 또는 IP 문자열 */
+	uint16_t server_domain_port;/* TCP·UDP 공통 포트 */
+
 	/* ── ETH 설정 ── */
 	char     eth_ip[16];
 	char     eth_netmask[16];

@@ -166,6 +166,24 @@ void get_datetime(datetime_t *dt)
 	seconds_to_datetime((uint32_t)unix_sec, dt);
 }
 
+void get_datetime_ms(datetime_t *dt, uint16_t *msec_out)
+{
+	if (!dt || !msec_out) {
+		return;
+	}
+	memset(dt, 0, sizeof(*dt));
+
+	uint64_t unix_sec = 0;
+	uint16_t msec = 0;
+
+	get_now_unix_ms(&unix_sec, &msec);
+	if (unix_sec > 0xFFFFFFFFULL) {
+		unix_sec = 0xFFFFFFFFULL;
+	}
+	seconds_to_datetime((uint32_t)unix_sec, dt);
+	*msec_out = msec;
+}
+
 void time_encode_now_9(uint8_t out[9])
 {
 	if (!out) {

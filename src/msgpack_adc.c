@@ -36,15 +36,15 @@ static inline void write_float32_be(uint8_t *p, float f)
 
 static inline float float32_round_2decimals(float x)
 {
-	double d = (double)x * 100.0;
+	float d = x * 100.0f;
 	long n;
 
-	if (d >= 0.0) {
-		n = (long)(d + 0.5);
+	if (d >= 0.0f) {
+		n = (long)(d + 0.5f);
 	} else {
-		n = (long)(d - 0.5);
+		n = (long)(d - 0.5f);
 	}
-	return (float)((double)n / 100.0);
+	return (float)n / 100.0f;
 }
 
 static size_t device_id_wire_len(const char *val)
@@ -214,20 +214,6 @@ int msgpack_encode_adc_snapshot(const adc_snapshot_t *snap, uint8_t *buf, size_t
 
 /* ── 테스트 모드: fixarray 4 (2ch) ───────────────────────────────────── */
 
-static int fmt_timestamp_str_test(char *out, size_t out_sz, const adc_snapshot_t *snap)
-{
-	int n = snprintf(out, out_sz, "%04u%02u%02u%02u%02u%02u%03u",
-			 (unsigned)snap->datetime.year, (unsigned)snap->datetime.month,
-			 (unsigned)snap->datetime.day, (unsigned)snap->datetime.hour,
-			 (unsigned)snap->datetime.min, (unsigned)snap->datetime.sec,
-			 (unsigned)snap->msec);
-
-	if (n != 17 || (size_t)n >= out_sz) {
-		return -1;
-	}
-	return 0;
-}
-
 int msgpack_encode_adc_test_2ch(const adc_snapshot_t *snap, uint8_t *buf, size_t buf_len)
 {
 	if (!snap || !buf || snap->ch_count < 2) {
@@ -237,7 +223,7 @@ int msgpack_encode_adc_test_2ch(const adc_snapshot_t *snap, uint8_t *buf, size_t
 	char ts[20];
 	size_t id_len = device_id_wire_len(snap->line);
 
-	if (fmt_timestamp_str_test(ts, sizeof(ts), snap) != 0) {
+	if (fmt_timestamp_udp17(ts, sizeof(ts), snap) != 0) {
 		return -1;
 	}
 

@@ -345,6 +345,31 @@ config SMARTGATEWAY_TCP_START_DELAY_MS
 	help
 	  부팅 직후 다른 태스크·네트워크 준비 시간 확보용.
 
+comment "── DNS 도메인 테스트 모드 ─────────────────────────────────"
+
+config SMARTGATEWAY_DNS_TEST_MODE
+	bool "DNS 도메인 접속 테스트 모드"
+	default n
+	select DNS_RESOLVER
+	help
+	  y이면 기존 IP/포트 설정 무시, DOMAIN:PORT 로 DNS 조회 후 접속.
+	  TCP·UDP 모두 해당 도메인·포트를 사용한다.
+	  prj.conf: CONFIG_SMARTGATEWAY_DNS_TEST_MODE=y
+
+config SMARTGATEWAY_DNS_TEST_DOMAIN
+	string "DNS 테스트 도메인"
+	default "dev.teia.co.kr"
+	help
+	  DNS_TEST_MODE=y 일 때 접속할 서버 도메인 (또는 IP 문자열).
+	  prj.conf: CONFIG_SMARTGATEWAY_DNS_TEST_DOMAIN="dev.teia.co.kr"
+
+config SMARTGATEWAY_DNS_TEST_PORT
+	int "DNS 테스트 포트 (TCP/UDP 공통)"
+	default 19198
+	range 1 65535
+	help
+	  DNS_TEST_MODE=y 일 때 TCP·UDP 모두 이 포트로 접속.
+
 comment "보드(이 기기)의 고정 IPv4는 Zephyr 표준 옵션으로 prj.conf 에서 설정합니다:"
 comment "  CONFIG_NET_CONFIG_MY_IPV4_ADDR, CONFIG_NET_CONFIG_MY_IPV4_GW, CONFIG_NET_CONFIG_MY_IPV4_NETMASK"
 

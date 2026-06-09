@@ -1,8 +1,7 @@
 /*
  * 2026.03.18
  * Smart Gateway - Main
- *
- * 부팅: NVS 로드 → (선택) 시리얼 설정 메뉴 → netmgr(NVS 분할 부팅: WiFi↔ETH 교대) → 앱 태스크
+ * 작성자 : LYH
  */
 
 #include <stdio.h>
@@ -16,11 +15,12 @@
 #include "udp.h"
 #include "config_nvs.h"
 #include "network_manager.h"
+#include "dip_switch.h"
 
-#define SmartGateway_VERSION "V2.0.0"
+#define SmartGateway_VERSION "V2.0.0(HL-Mando)"
 
 #if IS_ENABLED(CONFIG_WIFI_NXP)
-#  define NET_MODE_STR "WiFi (IW416 / EVK-MAYA-W166)"
+#  define NET_MODE_STR "WiFi ([u-blox] MAYA-W160-001B(IW416))"
 #else
 #  define NET_MODE_STR "Ethernet Only"
 #endif
@@ -28,10 +28,12 @@
 int main(void)
 {
 	printf("\n*** Smart Gateway %s ***\n", SmartGateway_VERSION);
-	printf("Board: %s\n", CONFIG_BOARD);
 	printf("Network: %s\n", NET_MODE_STR);
 
 	config_nvs_load();
+
+	/* DIP 스위치: NVS 로드 후 필요 시 덮어쓰기 */
+	dip_switch_apply();
 
 	printf("[CFG] NVS summary - boot mode %u (%s)\n",
 	       (unsigned int)g_gw_config.net_boot_mode,
@@ -46,6 +48,9 @@ int main(void)
 	       g_gw_config.eth_ip, g_gw_config.eth_tcp_server_ip,
 	       (unsigned)g_gw_config.eth_tcp_server_port,
 	       g_gw_config.eth_udp_server_ip, (unsigned)g_gw_config.eth_udp_server_port);
+	printf("      Domain %s:%u%s\n",
+	       g_gw_config.server_domain, (unsigned)g_gw_config.server_domain_port,
+	       IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE) ? " [DNS TEST MODE]" : "");
 
 	config_nvs_menu();
 
@@ -53,6 +58,16 @@ int main(void)
 	       (unsigned int)g_gw_config.net_boot_mode);
 	printf("ADC: %uch (raw/min/max), 2s window | UDP: %dms\n",
 	       (unsigned)CONFIG_SMARTGATEWAY_ADC_CHANNEL_COUNT, UDP_SEND_INTERVAL_MS);
+
+	/* ADC·RS-232: 네트워크 독립적 → 먼저 시작 */
+	if (adc_task_start() != 0) {
+		printf("[MAIN] Failed to create ADC task\n");
+		return -1;
+	}
+	if (rs232_task_start() != 0) {
+		printf("[MAIN] Failed to create RS-232 task\n");
+		return -1;
+	}
 
 	if (netmgr_start() != 0) {
 		printf("[MAIN] netmgr_start failed\n");
@@ -62,21 +77,16 @@ int main(void)
 	printf("[MAIN] Waiting for network ready (max 180s)...\n");
 
 	if (netmgr_wait_ready(180000) != 0) {
-		printf("[MAIN] Network ready timeout\n");
-		return -1;
+		/* 네트워크 타임아웃 — ADC·RS-232는 계속 동작, TCP·UDP만 중단 */
+		printf("[MAIN] Network ready timeout — ADC/RS-232 continue without network\n");
+		while (1) {
+			k_sleep(K_SECONDS(60));
+		}
 	}
 
 	printf("[MAIN] Network OK (%s) local IP %s\n",
 	       netmgr_active_iface_label(), netmgr_local_ip());
 
-	if (adc_task_start() != 0) {
-		printf("[MAIN] Failed to create ADC task\n");
-		return -1;
-	}
-	if (rs232_task_start() != 0) {
-		printf("[MAIN] Failed to create RS-232 task\n");
-		return -1;
-	}
 	if (tcp_gateway_task_start() != 0) {
 		printf("[MAIN] Failed to create TCP gateway task\n");
 		return -1;

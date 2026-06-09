@@ -14,6 +14,9 @@
 /** 현재 시각을 datetime_t로 채움 (ADC·UDP 타임스탬프용) */
 void get_datetime(datetime_t *dt);
 
+/** 현재 시각을 datetime_t와 밀리초로 채움 — sec/ms 동기화 보장 */
+void get_datetime_ms(datetime_t *dt, uint16_t *msec_out);
+
 /** TCP 시각 동기(MsgType 0x01 Body 앞 9B): yyyy,MM,dd,HH,mm,ss,ms. */
 void time_sync_from_tcp_timesync_body(const uint8_t *body, size_t body_len);
 

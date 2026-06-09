@@ -25,34 +25,35 @@
 
 /* --- 외곽 프레임 / MsgType 상수 --- */
 
-#define GW_STX			  		0x55	/* 프레임 시작 바이트 */
-#define GW_ETX			  		0x03	/* 프레임 종료 바이트 */
+#define GW_STX			  			0x55	/* 프레임 시작 바이트 */
+#define GW_ETX			  			0x03	/* 프레임 종료 바이트 */
 /* ② 핸드셰이크 서버→보드: STX + MsgType + Seq + Body + ETX */
-#define GW_SRV_RX_HDR3_LEN	  	3U		/* STX(1)+MsgType(1)+Seq(1) */
-#define GW_SRV_RX_TAIL_LEN	  	1U		/* ETX(1) */
+#define GW_SRV_RX_HDR3_LEN	  		3U		/* STX(1)+MsgType(1)+Seq(1) */
+#define GW_SRV_RX_TAIL_LEN	  		1U		/* ETX(1) */
 /* ③ 세션 서버→보드: STX + Len(2,BE) + MsgType + Seq + Body + ETX */
 #define GW_SRV_SESS_RX_HDR_LEN	  	5U		/* STX(1)+Len(2)+MsgType(1)+Seq(1) */
 #define GW_SRV_SESS_RX_TAIL_LEN	  	1U		/* ETX(1) */
-#define GW_TIME_WIRE_LEN		9U		/* yyyy(2)+MM+dd+HH+mm+ss+msec(2) */
+#define GW_TIME_WIRE_LEN			9U		/* yyyy(2)+MM+dd+HH+mm+ss+msec(2) */
 #define GW_RS232_CFG_WIRE_LEN		5U		/* BPS, DataBit, StopBit, Parity, Flow */
 #define GW_DEVICE_INDEX_WIRE_LEN	1U
-#define GW_VERSION_WIRE_LEN		3U
+#define GW_VERSION_WIRE_LEN			3U
 #define GW_SYNC_PAYLOAD_LEN		(GW_TIME_WIRE_LEN + GW_RS232_CFG_WIRE_LEN)
 #define GW_RS232_CFG_BODY_OFFSET	GW_TIME_WIRE_LEN
 #define GW_SYNC_COMPACT_LEN		(GW_SRV_RX_HDR3_LEN + GW_SYNC_PAYLOAD_LEN + GW_SRV_RX_TAIL_LEN)
 #define GW_MASTER_CODE_MAX_LEN		32U
 /* 보드→서버: STX + Len_BE + MsgType + Seq + Body + ETX */
-#define GW_TX_HDR_LEN		  	5U		/* STX(1)+Len(2)+MsgType(1)+Seq(1) */
-#define GW_TX_TAIL_LEN		  	1U		/* ETX(1) */
-#define GW_MSG_CONNECT		  	0x80	/* 보드→서버: 장치코드+IDX+버전 */
-#define GW_MSG_SYNC			0x01	/* 서버→보드: 시각+RS-232 (compact) */
-#define GW_MSG_MODBUS_REQ		0x02	/* 서버→보드: Modbus RTU 요청 (Len 프레임) */
-#define GW_MSG_ACK			0x81	/* 보드→서버: RS-232 설정 결과 Ret */
-#define GW_MSG_MODBUS_RESP		0x82	/* 보드→서버: 시각+Modbus 응답 (Len 프레임) */
-#define GW_BODY_CAP		  		256		/* 정적 버퍼(gw_mb_resp 등) 최대 Body 바이트 */
+#define GW_TX_HDR_LEN		  		5U		/* STX(1)+Len(2)+MsgType(1)+Seq(1) */
+#define GW_TX_TAIL_LEN		  		1U		/* ETX(1) */
+// SmartGateway -> Server
+#define GW_MSG_CONNECT		  		0x80	/* 보드→서버: 장치코드+IDX+버전 */
+#define GW_MSG_ACK					0x81	/* 보드→서버: RS-232 설정 결과 Ret */
+#define GW_MSG_MODBUS_RESP			0x82	/* 보드→서버: 시각+Modbus 응답 (Len 프레임) */
+// SmartGateway <- Server
+#define GW_MSG_SYNC					0x01	/* 서버→보드: 시각+RS-232 (compact) */
+#define GW_MSG_MODBUS_REQ			0x02	/* 서버→보드: Modbus RTU 요청 (Len 프레임) */
+#define GW_BODY_CAP		  			256		/* 정적 버퍼(gw_mb_resp 등) 최대 Body 바이트 */
 #define GW_RESPONSE_BODY_CAP		(GW_TIME_WIRE_LEN + GW_BODY_CAP)
-#define GW_RS232_DATA_PORT		1U
-/* 0x80 재전송 간격: CONFIG_SMARTGATEWAY_TCP_HANDSHAKE_POLL_MS (prj.conf, 기본 2000) */
+#define GW_RS232_DATA_PORT			1U
 
 BUILD_ASSERT(CONFIG_SMARTGATEWAY_TCP_MAX_BODY <= GW_BODY_CAP);
 #define GW_MAX_BODY CONFIG_SMARTGATEWAY_TCP_MAX_BODY /* Kconfig: 프레임 Body 최대 허용 */
@@ -61,7 +62,7 @@ BUILD_ASSERT(CONFIG_SMARTGATEWAY_TCP_STREAM_BUF >=
 	     (GW_SRV_SESS_RX_HDR_LEN + GW_MAX_BODY + GW_SRV_SESS_RX_TAIL_LEN));
 BUILD_ASSERT(GW_SYNC_PAYLOAD_LEN <= GW_BODY_CAP);
 
-#define TCP_GW_STACK 2048 // 4096
+#define TCP_GW_STACK 2048
 K_THREAD_STACK_DEFINE(tcp_gw_stack, TCP_GW_STACK);
 static struct k_thread tcp_gw_thr;
 
@@ -765,6 +766,11 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 			peer_port = (uint16_t)CONFIG_SMARTGATEWAY_TCP_PEER_PORT;
 		}
 
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
+		peer_host = g_gw_config.server_domain;
+		peer_port = g_gw_config.server_domain_port;
+#endif
+
 		int cfd = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
 		if (cfd < 0) {
@@ -773,28 +779,67 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 			continue;
 		}
 
-		struct sockaddr_in peer = { 0 };
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
+		{
+			char port_str[8];
+			struct zsock_addrinfo hints = {
+				.ai_family   = AF_INET,
+				.ai_socktype = SOCK_STREAM,
+			};
+			struct zsock_addrinfo *res = NULL;
 
-		peer.sin_family = AF_INET;
-		peer.sin_port = htons(peer_port);
-		if (zsock_inet_pton(AF_INET, peer_host, &peer.sin_addr) != 1) {
-			printf("[GW] TCP peer IP parse failed: %s\n", peer_host);
-			zsock_close(cfd);
-			k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
-			continue;
+			snprintf(port_str, sizeof(port_str), "%u", (unsigned)peer_port);
+			printf("[GW] DNS resolve '%s'...\n", peer_host);
+			int gaierr = zsock_getaddrinfo(peer_host, port_str, &hints, &res);
+
+			if (gaierr != 0 || res == NULL) {
+				printf("[GW] DNS resolve '%s' failed: %d\n", peer_host, gaierr);
+				gw_error_set(GW_ERR_TCP_COMM);
+				netmgr_notify_tcp_connect_fail();
+				zsock_close(cfd);
+				k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
+				continue;
+			}
+			printf("[GW] DNS TCP connect -> %s:%u\n", peer_host, (unsigned)peer_port);
+			if (zsock_connect(cfd, res->ai_addr, res->ai_addrlen) != 0) {
+				printf("[GW] DNS connect %s:%u errno=%d\n",
+				       peer_host, (unsigned)peer_port, errno);
+				gw_error_set(GW_ERR_TCP_COMM);
+				netmgr_notify_tcp_connect_fail();
+				zsock_freeaddrinfo(res);
+				zsock_close(cfd);
+				k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
+				continue;
+			}
+			zsock_freeaddrinfo(res);
 		}
+#else
+		{
+			struct sockaddr_in peer = { 0 };
 
-		printf("[GW] TCP connect -> %s:%u (active iface, NVS/g_w peer)\n", peer_host,
-		       (unsigned)peer_port);
-
-		if (zsock_connect(cfd, (struct sockaddr *)&peer, sizeof(peer)) != 0) {
-			printf("[GW] connect %s:%u errno=%d\n", peer_host, (unsigned)peer_port, errno);
-			gw_error_set(GW_ERR_TCP_COMM);
-			zsock_close(cfd);
-			k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
-			continue;
+			peer.sin_family = AF_INET;
+			peer.sin_port = htons(peer_port);
+			if (zsock_inet_pton(AF_INET, peer_host, &peer.sin_addr) != 1) {
+				printf("[GW] TCP peer IP parse failed: %s\n", peer_host);
+				zsock_close(cfd);
+				k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
+				continue;
+			}
+			printf("[GW] TCP connect -> %s:%u (active iface, NVS/gw peer)\n",
+			       peer_host, (unsigned)peer_port);
+			if (zsock_connect(cfd, (struct sockaddr *)&peer, sizeof(peer)) != 0) {
+				printf("[GW] connect %s:%u errno=%d\n",
+				       peer_host, (unsigned)peer_port, errno);
+				gw_error_set(GW_ERR_TCP_COMM);
+				netmgr_notify_tcp_connect_fail();
+				zsock_close(cfd);
+				k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
+				continue;
+			}
 		}
+#endif
 
+		netmgr_notify_tcp_connect_ok();
 		gw_handle_client(cfd);
 		zsock_close(cfd);
 		k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);

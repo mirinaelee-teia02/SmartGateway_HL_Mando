@@ -18,6 +18,8 @@
 #include <zephyr/net/ethernet.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/devicetree.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,6 +29,80 @@
 #endif
 
 LOG_MODULE_REGISTER(net_mgr, LOG_LEVEL_INF);
+
+/* LAN8741A 하드웨어 리셋 (P5_8 = /ETH_RESET, ACTIVE_HIGH)
+ * SYS_INIT(POST_KERNEL, 50): phy_mii_init(~priority 90) 이전에 실행.
+ * no-reset(overlay)으로 BMCR 소프트 리셋은 스킵.
+ */
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), eth_reset_gpios)
+static const struct gpio_dt_spec s_eth_reset_gpio =
+	GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), eth_reset_gpios);
+
+static int netmgr_phy_hw_reset(void)
+{
+	if (!gpio_is_ready_dt(&s_eth_reset_gpio)) {
+		return 0;
+	}
+	gpio_pin_configure_dt(&s_eth_reset_gpio, GPIO_OUTPUT_ACTIVE); /* 초기 HIGH */
+	gpio_pin_set_dt(&s_eth_reset_gpio, 0); /* LOW = nRST LOW = 리셋 인가 */
+	k_msleep(50);
+	gpio_pin_set_dt(&s_eth_reset_gpio, 1); /* HIGH = nRST HIGH = 리셋 해제 */
+	k_msleep(100);                         /* PHY 기동 대기 */
+	return 0;
+}
+SYS_INIT(netmgr_phy_hw_reset, POST_KERNEL, 50);
+#endif
+
+/* ── WiFi PDn (P4_1) 초기화 — SYS_INIT PRE_KERNEL_1 ───────────────
+ * MAYA-W160-001B PDn 미제어 시 플로팅/LOW → 모듈 파워다운 → wlan_init ret=-1.
+ * nxp_wifi 드라이버(pwr-gpios=P4_2)보다 먼저 PDn=HIGH로 설정해야 모듈 정상 기동.
+ */
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), wifi_pd_gpios)
+static const struct gpio_dt_spec s_wifi_pd_gpio =
+	GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), wifi_pd_gpios);
+
+static int netmgr_wifi_pd_init(void)
+{
+	if (!gpio_is_ready_dt(&s_wifi_pd_gpio)) {
+		return 0;
+	}
+	/* PDn HIGH: 모듈 전원 ON (파워다운 해제) */
+	gpio_pin_configure_dt(&s_wifi_pd_gpio, GPIO_OUTPUT_ACTIVE);
+	gpio_pin_set_dt(&s_wifi_pd_gpio, 1);
+	return 0;
+}
+SYS_INIT(netmgr_wifi_pd_init, PRE_KERNEL_2, 0);
+#endif
+
+/* ── WiFi 모듈 하드 리셋 (sys_reboot 직전 호출) ────────────────────
+ * pwr-gpios(P4_2)를 LOW로 내려 모듈을 reset 상태로 유지한 채 재부팅.
+ * 다음 부팅 시 nxp_wifi_wlan_init()이 pwr-gpios를 HIGH로 올리며 wlan_init.
+ */
+#if DT_NODE_HAS_PROP(DT_NODELABEL(nxp_wifi), pwr_gpios)
+static const struct gpio_dt_spec s_wifi_pwr_gpio =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(nxp_wifi), pwr_gpios);
+#endif
+
+static void netmgr_wifi_reset_assert(void)
+{
+	/* P4_1 (PDn) LOW: 모듈 완전 파워다운 후 재부팅
+	 * sys_reboot만으로는 WiFi 모듈 전원 유지 → SDIO 상태 잔류 → wlan_init -1.
+	 * PDn LOW로 완전 차단하면 다음 부팅 시 PRE_KERNEL_2에서 HIGH로 올리며 깨끗하게 초기화됨. */
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), wifi_pd_gpios)
+	if (gpio_is_ready_dt(&s_wifi_pd_gpio)) {
+		gpio_pin_configure_dt(&s_wifi_pd_gpio, GPIO_OUTPUT);
+		gpio_pin_set_dt(&s_wifi_pd_gpio, 0);  /* PDn LOW: 모듈 전원 차단 */
+	}
+#endif
+#if DT_NODE_HAS_PROP(DT_NODELABEL(nxp_wifi), pwr_gpios)
+	if (gpio_is_ready_dt(&s_wifi_pwr_gpio)) {
+		gpio_pin_configure_dt(&s_wifi_pwr_gpio, GPIO_OUTPUT);
+		gpio_pin_set_dt(&s_wifi_pwr_gpio, 0);  /* P4_2 LOW: reset 인가 */
+	}
+#endif
+	k_msleep(200);
+	printf("[NETMGR] WiFi PDn+RESET asserted (P4_1=LOW P4_2=LOW)\n");
+}
 
 #define NETMGR_STACK       7168
 #define NETMGR_PRIORITY    5
@@ -49,6 +125,7 @@ static K_SEM_DEFINE(s_sem_ready, 0, 1);
 static volatile bool           s_ready;
 static volatile netmgr_iface_t s_active;
 static char                    s_local_ip[16];
+
 
 /* ── 공개 API ──────────────────────────────────────────────────── */
 
@@ -130,6 +207,10 @@ uint16_t netmgr_udp_peer_port(void)
 	}
 	return 0U;
 }
+
+/* tcp_gateway.c 호출 인터페이스 유지 — 기능 없음 */
+void netmgr_notify_tcp_connect_fail(void) {}
+void netmgr_notify_tcp_connect_ok(void)   {}
 
 /* ── 내부 상태 전환 ────────────────────────────────────────────── */
 
@@ -311,6 +392,16 @@ static void wifi_connected_service_loop(void)
 	       g_gw_config.wifi_tcp_server_port,
 	       g_gw_config.wifi_udp_server_ip,
 	       g_gw_config.wifi_udp_server_port);
+	{
+		struct net_if *wif = net_if_get_first_wifi();
+		const struct net_linkaddr *ll = wif ? net_if_get_link_addr(wif) : NULL;
+
+		if (ll && ll->len >= 6) {
+			printf("[NETMGR] WiFi MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+			       ll->addr[0], ll->addr[1], ll->addr[2],
+			       ll->addr[3], ll->addr[4], ll->addr[5]);
+		}
+	}
 
 	while (wifi_is_ready()) {
 		k_sleep(K_SECONDS(1));
@@ -337,6 +428,15 @@ static bool try_eth(void)
 
 	printf("[NETMGR] ETH iface OK  planned board IP=%s\n",
 	       g_gw_config.eth_ip);
+	{
+		const struct net_linkaddr *ll = net_if_get_link_addr(iface);
+
+		if (ll && ll->len >= 6) {
+			printf("[NETMGR] ETH MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+			       ll->addr[0], ll->addr[1], ll->addr[2],
+			       ll->addr[3], ll->addr[4], ll->addr[5]);
+		}
+	}
 
 	for (int i = 0; i < ETH_MAX_RETRIES; i++) {
 		bool admin_up = net_if_is_admin_up(iface);
@@ -473,6 +573,7 @@ static void netmgr_task(void *a, void *b, void *c)
 				printf("[NETMGR] Ethernet mode: not ready -> NVS=WiFi, cold reboot\n");
 				g_gw_config.net_boot_mode = GW_NET_BOOT_WIFI;
 				config_nvs_save_boot_mode();
+				netmgr_wifi_reset_assert();
 				sys_reboot(SYS_REBOOT_COLD);
 			}
 			k_sleep(K_SECONDS(NETMGR_CYCLE_RETRY_S));
@@ -493,6 +594,7 @@ static void netmgr_task(void *a, void *b, void *c)
 		if (!try_wifi()) {
 			g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
 			config_nvs_save_boot_mode();
+			netmgr_wifi_reset_assert();
 			sys_reboot(SYS_REBOOT_COLD);
 		}
 

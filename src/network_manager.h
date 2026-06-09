@@ -44,4 +44,8 @@ uint16_t    netmgr_tcp_peer_port(void);
 const char *netmgr_udp_peer_ip(void);
 uint16_t    netmgr_udp_peer_port(void);
 
+/* TCP connect 결과 통보 — carrier 가짜 감지용 (tcp_gateway.c에서 호출) */
+void netmgr_notify_tcp_connect_fail(void);
+void netmgr_notify_tcp_connect_ok(void);
+
 #endif /* NETWORK_MANAGER_H */

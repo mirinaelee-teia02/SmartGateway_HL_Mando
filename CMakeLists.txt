@@ -8,7 +8,7 @@ project(SmartGateway)
 
 target_sources(app PRIVATE src/main.c src/adc.c src/udp.c src/msgpack_adc.c src/time_helper.c src/rs232.c src/tcp_gateway.c src/sync_gate.c src/gw_error.c)
 
-target_sources(app PRIVATE src/config_nvs.c src/network_manager.c)
+target_sources(app PRIVATE src/config_nvs.c src/network_manager.c src/dip_switch.c)
 
 if(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
   target_sources(app PRIVATE src/wifi_manager.c)

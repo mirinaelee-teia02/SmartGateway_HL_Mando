@@ -14,6 +14,7 @@
 #define ADC_H
 
 #include <stdint.h>
+#include <zephyr/kernel.h>
 
 #define ADC_MAX_CHANNELS  8
 
@@ -42,6 +43,12 @@ typedef struct {
 	float      max_val[ADC_MAX_CHANNELS];    /* 2초 윈도우 최대 전압 (V) */
 	uint8_t    ch_count;                     /* 2~8 */
 } adc_snapshot_t;
+
+/*
+ * UDP 전송 트리거 세마포어 — ADC 태스크가 N샘플마다 give, UDP 태스크가 take.
+ * udp.c에서 k_msleep(20ms) 대신 이 세마포어를 기다려 타이밍 지터를 제거한다.
+ */
+extern struct k_sem adc_udp_trigger_sem;
 
 /*
  * adc_task_start

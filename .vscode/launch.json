@@ -3,10 +3,75 @@
   "configurations": [
     {
       "type": "mcuxpresso-debug",
-      "name": "SmartGateway: LinkServer (MCU-Link 기본 펌웨어)",
+      "name": "SmartGateway: J-Link (빌드 후 플래시+디버그)",
       "request": "launch",
+      "probeType": "SEGGER",
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "Build SmartGateway (west)",
+      "skipBuildBeforeDebug": true,
+      "executable": {
+        "elf": "${workspaceFolder}/debug/zephyr/zephyr.elf"
+      },
+      "executableLoadTypePriority": "elf",
+      "stopAtSymbol": "main",
+      "isAttach": false,
+      "toolchainPath": "C:/Users/leeyu/zephyr-sdk-0.17.4/arm-zephyr-eabi",
+      "toolchainPrefix": "arm-zephyr-eabi-",
+      "gdbInitCommands": [
+        "set remotetimeout 600",
+        "set non-stop off"
+      ],
+      "gdbServerLaunchTimeout": 300000,
+      "gdbServerConfigs": {
+        "linkserver": {
+          "device": "MCXN947:"
+        },
+        "segger": {
+          "device": "MCXN947",
+          "interface": "SWD",
+          "speed": "4000"
+        },
+        "pemicro": {}
+      },
+      "showDevDebugOutput": "raw",
+      "probeSerialNumber": "69406050"
+    },
+    {
+      "type": "mcuxpresso-debug",
+      "name": "SmartGateway: J-Link (빌드 생략, 빠른 연결)",
+      "request": "launch",
+      "probeType": "SEGGER",
+      "cwd": "${workspaceFolder}",
+      "skipBuildBeforeDebug": true,
+      "executable": {
+        "elf": "${workspaceFolder}/debug/zephyr/zephyr.elf"
+      },
+      "executableLoadTypePriority": "elf",
+      "stopAtSymbol": "main",
+      "isAttach": false,
+      "toolchainPath": "C:/Users/leeyu/zephyr-sdk-0.17.4/arm-zephyr-eabi",
+      "toolchainPrefix": "arm-zephyr-eabi-",
+      "gdbInitCommands": [
+        "set remotetimeout 600",
+        "set non-stop off"
+      ],
+      "gdbServerLaunchTimeout": 300000,
+      "gdbServerConfigs": {
+        "linkserver": {},
+        "segger": {
+          "device": "MCXN947",
+          "interface": "SWD",
+          "speed": "4000"
+        },
+        "pemicro": {}
+      },
+      "showDevDebugOutput": "raw"
+    },
+    {
+      "type": "mcuxpresso-debug",
+      "name": "SmartGateway: LinkServer (MCU-Link, 구 FRDM 보드용)",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
       "skipBuildBeforeDebug": true,
       "executable": {
         "elf": "${workspaceFolder}/debug/zephyr/zephyr.elf"
@@ -33,68 +98,6 @@
       },
       "showDevDebugOutput": "raw",
       "probeSerialNumber": "215EX4HMPFX4M"
-    },
-    {
-      "type": "mcuxpresso-debug",
-      "name": "SmartGateway: LinkServer (빌드 생략, 빨리 연결만)",
-      "request": "launch",
-      "cwd": "${workspaceFolder}",
-      "skipBuildBeforeDebug": true,
-      "executable": {
-        "elf": "${workspaceFolder}/debug/zephyr/zephyr.elf"
-      },
-      "executableLoadTypePriority": "elf",
-      "stopAtSymbol": "main",
-      "isAttach": false,
-      "toolchainPath": "C:/Users/leeyu/zephyr-sdk-0.17.4/arm-zephyr-eabi",
-      "toolchainPrefix": "arm-zephyr-eabi-",
-      "gdbInitCommands": [
-        "set remotetimeout 600",
-        "set non-stop off"
-      ],
-      "gdbServerLaunchTimeout": 300000,
-      "debugServerLogFile": "${workspaceFolder}/debug/linkserver-mcux.log",
-      "gdbServerConfigs": {
-        "linkserver": {
-          "device": "MCXN947:FRDM-MCXN947",
-          "core": "cm33_core0",
-          "gdbServerLaunchTimeout": 300000
-        },
-        "segger": {},
-        "pemicro": {}
-      },
-      "showDevDebugOutput": "raw"
-    },
-    {
-      "type": "mcuxpresso-debug",
-      "name": "SmartGateway: SEGGER (MCU-Link을 J-Link 펌웨어로 바꾼 경우만)",
-      "request": "launch",
-      "probeType": "segger",
-      "cwd": "${workspaceFolder}",
-      "skipBuildBeforeDebug": true,
-      "executable": {
-        "elf": "${workspaceFolder}/debug/zephyr/zephyr.elf"
-      },
-      "executableLoadTypePriority": "elf",
-      "stopAtSymbol": "main",
-      "isAttach": false,
-      "toolchainPath": "C:/Users/leeyu/zephyr-sdk-0.17.4/arm-zephyr-eabi",
-      "toolchainPrefix": "arm-zephyr-eabi-",
-      "gdbInitCommands": [
-        "set remotetimeout 600",
-        "set non-stop off"
-      ],
-      "gdbServerLaunchTimeout": 300000,
-      "gdbServerConfigs": {
-        "linkserver": {},
-        "segger": {
-          "device": "MCXN947",
-          "interface": "SWD",
-          "speed": 4000
-        },
-        "pemicro": {}
-      },
-      "showDevDebugOutput": "raw"
     }
   ]
 }
