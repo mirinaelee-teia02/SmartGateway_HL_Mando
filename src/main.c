@@ -16,6 +16,12 @@
 #include "config_nvs.h"
 #include "network_manager.h"
 #include "dip_switch.h"
+#ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
+#include "di_do.h"
+#endif
+#ifdef CONFIG_USB_HOST_STACK
+#include "gas_sensor.h"
+#endif
 
 #define SmartGateway_VERSION "V2.0.0(HL-Mando)"
 
@@ -27,6 +33,7 @@
 
 int main(void)
 {
+
 	printf("\n*** Smart Gateway %s ***\n", SmartGateway_VERSION);
 	printf("Network: %s\n", NET_MODE_STR);
 
@@ -48,9 +55,17 @@ int main(void)
 	       g_gw_config.eth_ip, g_gw_config.eth_tcp_server_ip,
 	       (unsigned)g_gw_config.eth_tcp_server_port,
 	       g_gw_config.eth_udp_server_ip, (unsigned)g_gw_config.eth_udp_server_port);
-	printf("      Domain %s:%u%s\n",
-	       g_gw_config.server_domain, (unsigned)g_gw_config.server_domain_port,
-	       IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE) ? " [DNS TEST MODE]" : "");
+
+#ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
+	if (di_do_init() != 0) {
+		printf("[MAIN] DI/DO init failed\n");
+	}
+#endif
+
+	/* USB HOST(FT2232 가스 센서): NVS 메뉴 전 시작 → 메뉴 내 T키로 즉시 확인 가능 */
+#ifdef CONFIG_USB_HOST_STACK
+	gas_sensor_start();
+#endif
 
 	config_nvs_menu();
 
@@ -68,6 +83,12 @@ int main(void)
 		printf("[MAIN] Failed to create RS-232 task\n");
 		return -1;
 	}
+
+#ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
+	if (di_do_task_start() != 0) {
+		printf("[MAIN] DI/DO task start failed\n");
+	}
+#endif
 
 	if (netmgr_start() != 0) {
 		printf("[MAIN] netmgr_start failed\n");

@@ -19,10 +19,6 @@ typedef struct {
 	/* NVS 예약 필드(추후 프로토콜용). UDP MessagePack과는 무관 */
 	uint16_t device_index;
 
-	/* ── 도메인 접속 프로파일 (DNS 테스트 모드) ── */
-	char     server_domain[64]; /* 도메인 또는 IP 문자열 */
-	uint16_t server_domain_port;/* TCP·UDP 공통 포트 */
-
 	/* ── ETH 설정 ── */
 	char     eth_ip[16];
 	char     eth_netmask[16];
@@ -45,6 +41,10 @@ typedef struct {
 
 	/* NVS 영속: 0=WiFi 모드 1=이더넷 모드 (WiFi 실패 시 NVS를 1로 저장 후 재부팅) */
 	uint8_t  net_boot_mode;
+
+	/* 가스 센서 모델: 0=없음 1=O2-SM30 2=H2S-SM30 3=CO-SM30 4=S-300-3V 5=미정 */
+	uint8_t  sensor_model_usb1; /* USB1(EHCI) 포트 */
+	uint8_t  sensor_model_usb0; /* USB0(KHCI) 포트 */
 } gw_config_t;
 
 #define GW_NET_BOOT_WIFI 0U

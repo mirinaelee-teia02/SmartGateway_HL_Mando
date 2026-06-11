@@ -7,6 +7,12 @@
  */
 
 #include "config_nvs.h"
+#ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
+#include "di_do.h"
+#endif
+#ifdef CONFIG_USB_HOST_STACK
+#include "gas_sensor.h"
+#endif
 
 #include <zephyr/kernel.h>
 #include <zephyr/autoconf.h>
@@ -37,8 +43,8 @@
 #define CFG_MENU_TRIGGER_TIMEOUT_S 15
 
 /* ── NVS 스키마 버전 (구조체 변경 시 증가 → 구버전 NVS 자동 무시) ── */
-/* 6: server_domain·server_domain_port 추가; 포트 기본값 변경(TCP 19195, UDP 19197) */
-#define NVS_SCHEMA_VERSION 6U
+/* 8: sensor_model_usb0/1 추가 */
+#define NVS_SCHEMA_VERSION 8U
 #define KEY_SCHEMA_VER     0   /* key 0 */
 
 /* ── NVS 키 ──────────────────────────────────────────────────── */
@@ -61,9 +67,9 @@
 #define KEY_WIFI_UDP_PORT    17
 #define KEY_NET_BOOT_MODE    18
 #define KEY_DEVICE_INDEX     19
-#define KEY_SERVER_DOMAIN    20
-#define KEY_SERVER_DOMAIN_PORT 21
-#define KEY_LAST             KEY_SERVER_DOMAIN_PORT
+#define KEY_SENSOR_USB1      20
+#define KEY_SENSOR_USB0      21
+#define KEY_LAST             KEY_SENSOR_USB0
 
 /* ── 전역 설정 구조체 ─────────────────────────────────────────── */
 gw_config_t g_gw_config;
@@ -136,10 +142,6 @@ static void load_defaults(void)
 	strncpy(g_gw_config.master_code, CONFIG_SMARTGATEWAY_LINE_ID,
 		sizeof(g_gw_config.master_code) - 1);
 
-	/* 도메인 접속 프로파일 기본값 */
-	strncpy(g_gw_config.server_domain, CONFIG_SMARTGATEWAY_DNS_TEST_DOMAIN,
-		sizeof(g_gw_config.server_domain) - 1);
-	g_gw_config.server_domain_port = (uint16_t)CONFIG_SMARTGATEWAY_DNS_TEST_PORT;
 #if defined(CONFIG_SMARTGATEWAY_PROTO_DEVICE_ID)
 	g_gw_config.device_index =
 		(uint16_t)MIN((unsigned int)CONFIG_SMARTGATEWAY_PROTO_DEVICE_ID, 65535U);
@@ -196,6 +198,10 @@ static void load_defaults(void)
 #else
 	g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
 #endif
+
+	/* 가스 센서 모델 기본값: 0=없음 1=O2-SM30 2=H2S-SM30 3=CO-SM30 4=S-300-3V 5=미정 */
+	g_gw_config.sensor_model_usb1 = 1U; /* O2-SM30 */
+	g_gw_config.sensor_model_usb0 = 0U; /* 없음 */
 }
 
 /* ── NVS 읽기 헬퍼 ───────────────────────────────────────────── */
@@ -266,6 +272,22 @@ static void nvs_rd_u8_boot_mode(uint16_t key, uint8_t *val)
 #endif
 }
 
+static void nvs_rd_u8_gas_model(uint16_t key, uint8_t *val)
+{
+#if CFG_HAS_NVS
+	uint8_t tmp;
+
+	/* 7 = GAS_MODEL_COUNT — gas_sensor.h 없이도 컴파일 가능하도록 리터럴 사용 */
+	if (nvs_read(&nvs, key, &tmp, sizeof(tmp)) == (ssize_t)sizeof(tmp) &&
+	    tmp < 7U) {
+		*val = tmp;
+	}
+#else
+	ARG_UNUSED(key);
+	ARG_UNUSED(val);
+#endif
+}
+
 /* ── 공개 API ────────────────────────────────────────────────── */
 void config_nvs_load(void)
 {
@@ -313,8 +335,8 @@ void config_nvs_load(void)
 	nvs_rd_str(KEY_WIFI_UDP_IP,  g_gw_config.wifi_udp_server_ip, sizeof(g_gw_config.wifi_udp_server_ip));
 	nvs_rd_u16(KEY_WIFI_UDP_PORT,&g_gw_config.wifi_udp_server_port);
 	nvs_rd_u8_boot_mode(KEY_NET_BOOT_MODE, &g_gw_config.net_boot_mode);
-	nvs_rd_str(KEY_SERVER_DOMAIN,     g_gw_config.server_domain,     sizeof(g_gw_config.server_domain));
-	nvs_rd_u16(KEY_SERVER_DOMAIN_PORT,&g_gw_config.server_domain_port);
+	nvs_rd_u8_gas_model(KEY_SENSOR_USB1, &g_gw_config.sensor_model_usb1);
+	nvs_rd_u8_gas_model(KEY_SENSOR_USB0, &g_gw_config.sensor_model_usb0);
 
 #if !IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 	g_gw_config.net_boot_mode = GW_NET_BOOT_ETH;
@@ -374,8 +396,8 @@ void config_nvs_save(void)
 	WS(KEY_WIFI_UDP_IP,  g_gw_config.wifi_udp_server_ip);
 	WU(KEY_WIFI_UDP_PORT,g_gw_config.wifi_udp_server_port);
 	WU(KEY_NET_BOOT_MODE, g_gw_config.net_boot_mode);
-	WS(KEY_SERVER_DOMAIN,     g_gw_config.server_domain);
-	WU(KEY_SERVER_DOMAIN_PORT,g_gw_config.server_domain_port);
+	WU(KEY_SENSOR_USB1,   g_gw_config.sensor_model_usb1);
+	WU(KEY_SENSOR_USB0,   g_gw_config.sensor_model_usb0);
 
 #undef WS
 #undef WU
@@ -469,6 +491,30 @@ static void cfg_drain_rx_fifo(void)
 	}
 	cfg_rx_pushback = -1;
 }
+
+#ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
+/* DI/DO 서브 메뉴 전용: 단일 키 대기, DI 변경 시 '\0' 반환(재출력 트리거) */
+static char cfg_di_do_getkey(uint8_t *di_snap)
+{
+	for (;;) {
+		uint8_t di_now;
+
+		if (di_read(&di_now) == 0 && di_now != *di_snap) {
+			*di_snap = di_now;
+			return '\0';
+		}
+		int c = cfg_poll_char();
+
+		if (c >= 0) {
+			if (c == '\r' || c == '\n') {
+				continue;
+			}
+			return (char)c;
+		}
+		k_msleep(50);
+	}
+}
+#endif /* CONFIG_SMARTGATEWAY_DI_DO_ENABLE */
 
 static int read_line(char *buf, size_t size)
 {
@@ -566,16 +612,79 @@ static void print_config(void)
 	printf(" H) WiFi PC UDP IP       : %s\r\n", g_gw_config.wifi_udp_server_ip);
 	printf(" I) WiFi UDP port        : %u\r\n", g_gw_config.wifi_udp_server_port);
 
-	printf("\r\n --- DNS 테스트 프로파일 (DNS_TEST_MODE=y 빌드 시 사용) ---\r\n");
-	printf(" J) Server domain        : %s\r\n", g_gw_config.server_domain);
-	printf(" K) Domain port (TCP+UDP): %u\r\n", g_gw_config.server_domain_port);
 
+#ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
+	printf("\r\n --- DI/DO 테스트 ---\r\n");
+	{
+		uint8_t di  = 0;
+		uint8_t dov = do_get();
+
+		(void)di_read(&di);
+		printf(" D) DI/DO Test\r\n");
+		printf("    DI=0x%02X [", di);
+		for (int i = 0; i <= 7; i++) {
+			printf("%d", (di >> i) & 1);
+		}
+		printf("]  DO=0x%02X [", dov);
+		for (int i = 0; i <= 7; i++) {
+			printf("%d", (dov >> i) & 1);
+		}
+		printf("]\r\n");
+		printf("    PWR1=%s  PWR2=%s\r\n",
+		       ext_pwr1_get() ? "ON" : "OFF",
+		       ext_pwr2_get() ? "ON" : "OFF");
+	}
+#endif
+#ifdef CONFIG_USB_HOST_STACK
+	printf("\r\n --- 가스 센서 (FT2232 USB HOST) ---\r\n");
+	for (int _pi = 0; _pi < GAS_PORT_COUNT; _pi++) {
+		gas_port_t _p = (gas_port_t)_pi;
+		const char *_pname = (_pi == GAS_PORT_USB1) ? "USB1(EHCI)" : "USB0(KHCI)";
+		gas_sensor_model_t _m =
+			(_pi == GAS_PORT_USB1)
+			? (gas_sensor_model_t)g_gw_config.sensor_model_usb1
+			: (gas_sensor_model_t)g_gw_config.sensor_model_usb0;
+
+		printf(" %s [%-10s]:", _pname, gas_model_name(_m));
+		if (gas_sensor_connected(_p)) {
+			gas_reading_t _r = gas_sensor_get(_p);
+
+			if (_r.valid) {
+				printf(" %.1f %s\r\n",
+				       (double)_r.pct, gas_model_unit(_m));
+			} else {
+				printf(" 데이터 대기중...\r\n");
+			}
+		} else {
+			printf(" 미연결\r\n");
+		}
+	}
+	printf(" T) 센서 모델 설정\r\n");
+#endif
 	printf("------------------------------\r\n");
 	printf(" R) Restore Kconfig defaults + erase NVS\r\n");
 	printf(" S) Save NVS and continue boot\r\n");
 	printf(" Q) Continue without saving\r\n");
+#ifdef CONFIG_USB_HOST_STACK
+	printf(" T) 가스 센서 모델 설정\r\n");
+#endif
 	printf("==============================\r\n");
 	printf(" Item key + Enter (S=save  Q=quit): ");
+}
+
+static void nvs_save_sensor_models(void)
+{
+#if CFG_HAS_NVS
+	if (!nvs_ok) {
+		return;
+	}
+	(void)nvs_write(&nvs, KEY_SENSOR_USB1,
+			&g_gw_config.sensor_model_usb1,
+			sizeof(g_gw_config.sensor_model_usb1));
+	(void)nvs_write(&nvs, KEY_SENSOR_USB0,
+			&g_gw_config.sensor_model_usb0,
+			sizeof(g_gw_config.sensor_model_usb0));
+#endif
 }
 
 /** List menu: pick item to edit. true = saved and continue boot. */
@@ -630,6 +739,173 @@ static bool cfg_menu_letter_loop(void)
 			printf(" -> Next boot Ethernet(1). Press S to save\r\n");
 			continue;
 		}
+#ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
+		if (sel == 'D') {
+			/* DI/DO 서브 메뉴 */
+			for (;;) {
+				uint8_t di  = 0;
+				uint8_t dov = do_get();
+
+				(void)di_read(&di);
+				printf("\r\n[DI/DO Test]\r\n");
+				printf("  DI input : 0x%02X  [", di);
+				for (int i = 0; i <= 7; i++) {
+					printf("%d", (di >> i) & 1);
+				}
+				printf("]\r\n");
+				printf("  DO output: 0x%02X  [", dov);
+				for (int i = 0; i <= 7; i++) {
+					printf("%d", (dov >> i) & 1);
+				}
+				printf("]\r\n");
+				printf("  EXT_PWR1 : %s   EXT_PWR2 : %s\r\n",
+				       ext_pwr1_get() ? "ON " : "OFF",
+				       ext_pwr2_get() ? "ON " : "OFF");
+				printf("  0~7) DO 비트 토글 (DO0~DO7)\r\n");
+				printf("  A  ) DO 전체 ON\r\n");
+				printf("  Z  ) DO 전체 OFF\r\n");
+				printf("  P    ) EXT_PWR1 토글\r\n");
+				printf("  X    ) EXT_PWR2 토글\r\n");
+				printf("  Q    ) 돌아가기\r\n");
+				printf("  Select: ");
+
+				uint8_t di_snap = di_get();
+				char dsel = cfg_di_do_getkey(&di_snap);
+
+				if (dsel == '\0') {
+					continue; /* DI 변경 → 메뉴 재출력 */
+				}
+				if (dsel >= 'a' && dsel <= 'z') {
+					dsel = (char)(dsel - 32);
+				}
+				if (dsel == 'Q') {
+					break;
+				}
+				/* 0~7 → DO 비트 토글 */
+				if (dsel >= '0' && dsel <= '7') {
+					uint8_t bit  = (uint8_t)(dsel - '0');
+					uint8_t next = do_get() ^ (uint8_t)(1U << bit);
+
+					(void)do_set(next);
+					printf("  -> DO%d 토글  DO=0x%02X\r\n", (int)bit, next);
+					continue;
+				}
+				if (dsel == 'A') {
+					(void)do_set(0xFFU);
+					printf("  -> DO 전체 ON\r\n");
+					continue;
+				}
+				if (dsel == 'Z') {
+					(void)do_set(0x00U);
+					printf("  -> DO 전체 OFF\r\n");
+					continue;
+				}
+				if (dsel == 'P') {
+					ext_pwr1_set(!ext_pwr1_get());
+					continue;
+				}
+				if (dsel == 'X') {
+					ext_pwr2_set(!ext_pwr2_get());
+					continue;
+				}
+			}
+			continue;
+		}
+#endif
+
+#ifdef CONFIG_USB_HOST_STACK
+		if (sel == 'T') {
+			/* 헤더 1회 출력, 값 2줄만 2초마다 갱신 */
+			printf("\r\n[가스 센서] (2초 자동 갱신 | 1=USB1모델 2=USB0모델 Q=나가기)\r\n");
+			printf("\r\n\r\n"); /* 값 2줄 자리 확보 */
+
+			for (;;) {
+				/* ANSI: 2줄 위로 이동 후 값 라인만 덮어씀 */
+				printf("\033[2A");
+				for (int _pi = 0; _pi < GAS_PORT_COUNT; _pi++) {
+					gas_port_t _p = (gas_port_t)_pi;
+					const char *_pn = (_pi == GAS_PORT_USB1) ?
+							  "USB1(EHCI)" : "USB0(KHCI)";
+					gas_sensor_model_t _m =
+						(_pi == GAS_PORT_USB1)
+						? (gas_sensor_model_t)g_gw_config.sensor_model_usb1
+						: (gas_sensor_model_t)g_gw_config.sensor_model_usb0;
+
+					printf("\033[2K\r  %s [%-10s]:", _pn, gas_model_name(_m));
+					if (_m != GAS_MODEL_NONE && gas_sensor_connected(_p)) {
+						gas_reading_t _r = gas_sensor_get(_p);
+
+						if (_r.valid) {
+							printf(" %.1f %s",
+							       (double)_r.pct,
+							       gas_model_unit(_m));
+						} else {
+							printf(" 대기중...");
+						}
+					} else if (_m == GAS_MODEL_NONE) {
+						printf(" -");
+					} else {
+						printf(" 미연결");
+					}
+					printf("\033[K\r\n");
+				}
+
+				/* 2초(20×100ms) 동안 키 폴링 */
+				char _tsel = '\0';
+
+				for (int _ms = 0; _ms < 2000; _ms += 100) {
+					int _c = cfg_poll_char();
+
+					if (_c >= 0 && _c != '\r' && _c != '\n') {
+						_tsel = (char)_c;
+						break;
+					}
+					k_msleep(100);
+				}
+
+				if (_tsel == '\0') {
+					continue;
+				}
+				if (_tsel >= 'a' && _tsel <= 'z') {
+					_tsel = (char)(_tsel - 32);
+				}
+				if (_tsel == 'Q') {
+					break;
+				}
+				if (_tsel == '1' || _tsel == '2') {
+					gas_port_t _tp = (_tsel == '1') ?
+							 GAS_PORT_USB1 : GAS_PORT_USB0;
+
+					printf("\r\n  모델: 0=없음 1=O2-SM30 2=H2S-SM30"
+					       " 3=CO-SM30 4=CH4-S3-3V 5=S-300-3V(CO2) 6=AM1002\r\n");
+					printf("  USB%d 모델 번호(0~6): ",
+					       _tp == GAS_PORT_USB1 ? 1 : 0);
+					read_line(buf, sizeof(buf));
+					if (buf[0] >= '0' && buf[0] <= '6') {
+						uint8_t _mv = (uint8_t)(buf[0] - '0');
+
+						gas_sensor_set_model(_tp,
+							(gas_sensor_model_t)_mv);
+						if (_tp == GAS_PORT_USB1) {
+							g_gw_config.sensor_model_usb1 = _mv;
+						} else {
+							g_gw_config.sensor_model_usb0 = _mv;
+						}
+						nvs_save_sensor_models();
+						printf("  -> USB%d: %s 저장됨\r\n",
+						       _tp == GAS_PORT_USB1 ? 1 : 0,
+						       gas_model_name(
+							       (gas_sensor_model_t)_mv));
+					} else {
+						printf("  [!] 0~6 입력\r\n");
+					}
+					printf("\r\n\r\n"); /* 값 2줄 자리 재확보 */
+				}
+			}
+			printf("\r\n");
+			continue;
+		}
+#endif /* CONFIG_USB_HOST_STACK */
 
 		printf(" New value (Enter = keep): ");
 		read_line(buf, sizeof(buf));
@@ -738,18 +1014,9 @@ static bool cfg_menu_letter_loop(void)
 				printf(" [!] Invalid port\r\n");
 			}
 			break;
-		case 'J':
-			strncpy(g_gw_config.server_domain, buf,
-				sizeof(g_gw_config.server_domain) - 1);
-			g_gw_config.server_domain[sizeof(g_gw_config.server_domain) - 1] = '\0';
-			break;
-		case 'K':
-			if (parse_port(buf, &port)) {
-				g_gw_config.server_domain_port = port;
-			} else {
-				printf(" [!] Invalid port\r\n");
-			}
-			break;
+		case 'T':
+			/* T는 위 서브메뉴(CONFIG_USB_HOST_STACK)에서 처리됨 */
+			continue;
 		default:
 			printf(" [!] Unknown item\r\n");
 			break;

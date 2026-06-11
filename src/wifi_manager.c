@@ -56,7 +56,13 @@ static void wifi_fill_connect_params(struct wifi_connect_req_params *params)
 	params->ssid        = g_gw_config.wifi_ssid;
 	params->ssid_length = strlen(g_gw_config.wifi_ssid);
 	params->channel     = WIFI_CHANNEL_ANY;
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_SCAN_BAND_2_4_GHZ)
+	params->band        = WIFI_FREQ_BAND_2_4_GHZ;
+#elif IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_SCAN_BAND_5_GHZ)
+	params->band        = WIFI_FREQ_BAND_5_GHZ;
+#else
 	params->band        = WIFI_FREQ_BAND_UNKNOWN;
+#endif
 	params->mfp         = WIFI_MFP_OPTIONAL;
 
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_SECURITY_WPA3)
@@ -97,6 +103,11 @@ static int wifi_set_static_ip(struct net_if *iface)
 	net_if_ipv4_set_netmask_by_addr(iface, &addr, &mask);
 	net_if_ipv4_set_gw(iface, &gw);
 	net_if_set_default(iface);
+
+	/* 기본 라우터 등록: 외부 트래픽(DNS·인터넷)을 GW로 포워딩 */
+	if (!net_if_ipv4_router_add(iface, &gw, true, 0)) {
+		LOG_ERR("WiFi router add failed");
+	}
 
 	LOG_INF("WiFi static IP %s / %s gw %s",
 		g_gw_config.wifi_ip, g_gw_config.wifi_netmask, g_gw_config.wifi_gw);

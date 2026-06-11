@@ -36,7 +36,7 @@
 #include "sync_gate.h"
 #endif
 
-#define UDP_STACK_SIZE	 2048 /* udp_task 스택 크기(바이트) */
+#define UDP_STACK_SIZE   2048
 
 #if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
 #  define UDP_BIND_PORT_WIFI CONFIG_SMARTGATEWAY_WIFI_UDP_BIND_PORT
@@ -64,31 +64,6 @@ static int udp_peer_apply(struct sockaddr_in *peer)
 	const char *ip = netmgr_udp_peer_ip();
 	uint16_t port = netmgr_udp_peer_port();
 
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
-	ip   = g_gw_config.server_domain;
-	port = g_gw_config.server_domain_port;
-
-	if (ip == NULL || ip[0] == '\0' || port == 0U) {
-		return -EINVAL;
-	}
-	char port_str[8];
-	struct zsock_addrinfo hints = {
-		.ai_family   = AF_INET,
-		.ai_socktype = SOCK_DGRAM,
-	};
-	struct zsock_addrinfo *res = NULL;
-
-	snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-	int gaierr = zsock_getaddrinfo(ip, port_str, &hints, &res);
-
-	if (gaierr != 0 || res == NULL) {
-		printf("[UDP] DNS resolve '%s' failed: %d\n", ip, gaierr);
-		return -EINVAL;
-	}
-	memcpy(peer, res->ai_addr, sizeof(*peer));
-	zsock_freeaddrinfo(res);
-	return 0;
-#else
 	if (ip == NULL || ip[0] == '\0' || port == 0U) {
 		return -EINVAL;
 	}
@@ -99,7 +74,6 @@ static int udp_peer_apply(struct sockaddr_in *peer)
 		return -EINVAL;
 	}
 	return 0;
-#endif
 }
 
 /* sendto 에 매번 채우는 목적지(초기화 구간에서 한 번 설정) */
@@ -214,16 +188,9 @@ static void udp_task(void *p1, void *p2, void *p3)
 		zsock_close(udp_sock);
 		return;
 	}
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
-	printf("[UDP] TX target (DNS): %s:%u (%s), interval %dms\n",
-	       g_gw_config.server_domain,
-	       (unsigned)g_gw_config.server_domain_port,
-	       netmgr_active_iface_label(), UDP_SEND_INTERVAL_MS);
-#else
 	printf("[UDP] TX target: %s:%u (%s), interval %dms\n",
 	       netmgr_udp_peer_ip(), (unsigned)netmgr_udp_peer_port(),
 	       netmgr_active_iface_label(), UDP_SEND_INTERVAL_MS);
-#endif
 
 	uint8_t tx_buf[UDP_TX_BUF_SIZE]; /* MessagePack 출력 버퍼 */
 	/* ADC 샘플 미준비 연속일 때 로그만 살짝 */
@@ -276,11 +243,23 @@ static void udp_task(void *p1, void *p2, void *p3)
 					    (struct sockaddr *)&peer_addr,
 					    sizeof(peer_addr));
 		/* sent: 실제로 나간 UDP 페이로드 바이트 수(sendto는 블로킹 계열) */
+		static bool s_udp_send_err;
+
 		if (sent != len) {
-			printf("[UDP] [CHECK 6] FAIL - Send error: %zd (expected %d)\n", sent, len);
+			if (!s_udp_send_err) {
+				printf("[UDP] [CHECK 6] FAIL - Send error: %zd (expected %d)\n",
+				       sent, len);
+				s_udp_send_err = true;
+			}
 			gw_error_set(GW_ERR_UDP_COMM);
-		} else if (gw_error_get() == GW_ERR_UDP_COMM) {
-			gw_error_clear();
+		} else {
+			if (s_udp_send_err) {
+				printf("[UDP] [CHECK 6] OK - Send recovered\n");
+				s_udp_send_err = false;
+			}
+			if (gw_error_get() == GW_ERR_UDP_COMM) {
+				gw_error_clear();
+			}
 		}
 
 		/*

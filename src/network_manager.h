@@ -48,4 +48,5 @@ uint16_t    netmgr_udp_peer_port(void);
 void netmgr_notify_tcp_connect_fail(void);
 void netmgr_notify_tcp_connect_ok(void);
 
+
 #endif /* NETWORK_MANAGER_H */

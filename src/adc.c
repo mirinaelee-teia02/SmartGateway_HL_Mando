@@ -2,7 +2,8 @@
  * Smart Gateway - ADC 모듈 구현 (AD7327 SPI 8채널)
  *
  * - k_timer 2ms 주기로 샘플 트리거
- * - AD7327: 12-bit, ±10V (±2VREF, VREF=5V), two's complement
+ * - AD7327: 12-bit, ±10V (±2VREF, 내부VREF=2.5V), two's complement
+ *   ADC 입력단 하드웨어 분배기 2:1 → 실제 입력범위 ±10V
  * - LPSPI6(FC6): P3_20=MOSI, P3_21=SCK, P3_22=MISO, P3_23=PCS0
  * - 2초 윈도우 min/max, UDP 20ms 전송
  *
@@ -37,28 +38,28 @@
 #define AD7327_NUM_CHANNELS	8
 #define AD7327_RESOLUTION	12
 #define AD7327_FULL_SCALE	(1 << (AD7327_RESOLUTION - 1))	/* 2048 */
-#define AD7327_VREF_V		10.0f	/* ±10V */
+#define AD7327_VREF_V		10.0f	/* ±10V 
 
-/* AD7327 제어 레지스터 (문서 기준 비트 위치):
+/* AD7327 Control Register 1 (REG_SEL=00) 비트 구성:
  * bit15    = WRITE=1
- * bit14:13 = REG_SEL = 00
- * bit12:10 = ADD[2:0] = 채널번호  ← (이전: <<12 오류, 올바른 위치 <<10)
- * bit9:8   = Mode=00 (8채널 싱글엔드)
- * bit7:6   = PM=00   (정상동작)
- * bit5     = Coding=0 (2의보수)
- * bit4     = Ref=1   (내부 기준전원 사용)
- * bit3:2   = Seq=00  (직접 채널 선택, 시퀀서 없음)
- * bit1     = ZERO=0
+ * bit14:13 = REG_SEL=00 (Control Register 1 선택)
+ * bit12:10 = ADD[2:0]   = 채널번호
+ * bit9:8   = MODE=00    (8채널 싱글엔드, Table 10)
+ * bit7:6   = PM=00      (정상동작)
+ * bit5     = Coding=0   (2의보수)
+ * bit4     = Ref=1      (내부 기준전원 2.5V 사용)
+ * bit3:2   = Seq=00     (직접 채널 선택, 시퀀서 없음)
+ * bit1:0   = 0
+ *
+ * 0x8010 = bit15=1, bit9:8=00(MODE=8ch single-ended), bit4=1(내부ref)
  */
 #define AD7327_CH_CTRL(ch)	((uint16_t)(0x8010U | ((uint16_t)(ch) << 10U)))
+
 
 /* ── SPI 디바이스 ────────────────────────────────────────────── */
 #define AD7327_NODE DT_NODELABEL(ad7327)
 
-/* AD7327 SPI Mode 1 (CPOL=0, CPHA=1):
- * DIN: SCLK 하강엣지에서 래치 (t9/t10 기준)
- * DOUT: SCLK 하강엣지 후 유효 (t4 기준)
- * SPI_MODE_CPHA = CPHA=1, CPOL=0 유지 */
+/* AD7327 SPI Mode 1 (CPOL=0, CPHA=1) */
 static const struct spi_dt_spec s_spi = SPI_DT_SPEC_GET(
 	AD7327_NODE,
 	SPI_WORD_SET(16) | SPI_TRANSFER_MSB | SPI_OP_MODE_MASTER | SPI_MODE_CPHA,
@@ -129,13 +130,14 @@ static int ad7327_transfer(uint16_t ctrl_word, uint16_t *result)
 /* 결과어 파싱: [15:13]=채널번호, [12:1]=12bit 2의보수, [0]=0 */
 static float ad7327_result_to_volts(uint16_t raw)
 {
-	uint16_t data12 = (raw >> 1) & 0x0FFFU;
+	uint16_t data12 = (raw >> 1) & 0x0FFFU;  /* bits[12:1] */
 	int16_t code = (data12 & 0x0800U)
 			? (int16_t)(data12 | 0xF000U)
 			: (int16_t)data12;
 
 	return (float)code * (AD7327_VREF_V / (float)AD7327_FULL_SCALE);
 }
+
 
 /* 8채널 읽기 - Read-ahead (2ms 1사이클):
  * 전송N과 수신N이 동시 발생 → 9회 전송으로 8채널 처리

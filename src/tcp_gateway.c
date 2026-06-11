@@ -766,11 +766,6 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 			peer_port = (uint16_t)CONFIG_SMARTGATEWAY_TCP_PEER_PORT;
 		}
 
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
-		peer_host = g_gw_config.server_domain;
-		peer_port = g_gw_config.server_domain_port;
-#endif
-
 		int cfd = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
 		if (cfd < 0) {
@@ -779,41 +774,6 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 			continue;
 		}
 
-#if IS_ENABLED(CONFIG_SMARTGATEWAY_DNS_TEST_MODE)
-		{
-			char port_str[8];
-			struct zsock_addrinfo hints = {
-				.ai_family   = AF_INET,
-				.ai_socktype = SOCK_STREAM,
-			};
-			struct zsock_addrinfo *res = NULL;
-
-			snprintf(port_str, sizeof(port_str), "%u", (unsigned)peer_port);
-			printf("[GW] DNS resolve '%s'...\n", peer_host);
-			int gaierr = zsock_getaddrinfo(peer_host, port_str, &hints, &res);
-
-			if (gaierr != 0 || res == NULL) {
-				printf("[GW] DNS resolve '%s' failed: %d\n", peer_host, gaierr);
-				gw_error_set(GW_ERR_TCP_COMM);
-				netmgr_notify_tcp_connect_fail();
-				zsock_close(cfd);
-				k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
-				continue;
-			}
-			printf("[GW] DNS TCP connect -> %s:%u\n", peer_host, (unsigned)peer_port);
-			if (zsock_connect(cfd, res->ai_addr, res->ai_addrlen) != 0) {
-				printf("[GW] DNS connect %s:%u errno=%d\n",
-				       peer_host, (unsigned)peer_port, errno);
-				gw_error_set(GW_ERR_TCP_COMM);
-				netmgr_notify_tcp_connect_fail();
-				zsock_freeaddrinfo(res);
-				zsock_close(cfd);
-				k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
-				continue;
-			}
-			zsock_freeaddrinfo(res);
-		}
-#else
 		{
 			struct sockaddr_in peer = { 0 };
 
@@ -825,8 +785,7 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 				k_msleep(CONFIG_SMARTGATEWAY_TCP_RECONNECT_MS);
 				continue;
 			}
-			printf("[GW] TCP connect -> %s:%u (active iface, NVS/gw peer)\n",
-			       peer_host, (unsigned)peer_port);
+			printf("[GW] TCP connect -> %s:%u\n", peer_host, (unsigned)peer_port);
 			if (zsock_connect(cfd, (struct sockaddr *)&peer, sizeof(peer)) != 0) {
 				printf("[GW] connect %s:%u errno=%d\n",
 				       peer_host, (unsigned)peer_port, errno);
@@ -837,7 +796,6 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 				continue;
 			}
 		}
-#endif
 
 		netmgr_notify_tcp_connect_ok();
 		gw_handle_client(cfd);

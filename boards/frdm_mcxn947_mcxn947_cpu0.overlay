@@ -167,6 +167,52 @@
 	};
 };
 
+/* ── LPI2C1 (FC1 I2C): DO_I2C — PCA9554DB DO 8채널 ─────────────────────
+ * P0_20 = FC1_P0 SDA (func3) = N9X_MUX('0',20,3)
+ * P0_21 = FC1_P1 SCL (func3) = N9X_MUX('0',21,3)
+ * FRDM Arduino SPI(FC1_LPSPI1) 비활성 → I2C로 교체
+ */
+&pinctrl {
+	pinmux_flexcomm1_lpi2c: pinmux_flexcomm1_lpi2c {
+		group0 {
+			pinmux = <0x05000300>,	/* FC1_P0 SDA P0_20, func3 */
+					 <0x05400300>;	/* FC1_P1 SCL P0_21, func3 */
+			slew-rate = "fast";
+			drive-strength = "low";
+			input-enable;
+			bias-pull-up;
+			drive-open-drain;
+		};
+	};
+};
+
+/* FRDM Arduino SPI — 커스텀 PCB 미사용, LPI2C1으로 대체 */
+&flexcomm1_lpspi1 {
+	status = "disabled";
+};
+
+&flexcomm1_lpi2c1 {
+	status = "okay";
+	pinctrl-0 = <&pinmux_flexcomm1_lpi2c>;
+	pinctrl-names = "default";
+	clock-frequency = <100000>;
+};
+
+/* ── LPI2C7 (FC7 I2C): DI_I2C — PCA9554DB DI 8채널 ─────────────────────
+ * FRDM base DTS(frdm_mcxn947.dtsi)에서 이미 P3_2(SDA)/P3_3(SCL)으로 설정됨.
+ * overlay 추가 불필요 — flexcomm7/lpi2c7 status="okay", pinctrl 기 완성.
+ */
+
+/* ── GPIO0 (EXT_PWR1 P0_24 / EXT_PWR2 P0_25) ───────────────────────── */
+&gpio0 {
+	status = "okay";
+};
+
+/* ── GPIO3 (DO_INT P3_0 / DI_INT P3_1 입력) ────────────────────────── */
+&gpio3 {
+	status = "okay";
+};
+
 /* ── DIP 스위치 8개 (GPIO4) ─────────────────────────────────────────
  * SW1~SW7: 7비트 이진수 → 장치코드 번호 (0=NVS사용, 1~127=코드선택)
  * SW8: 인덱스 (OFF=0, ON=1)
@@ -205,6 +251,7 @@
  *   특정 MAC 고정 필요 시: local-mac-address = [xx xx xx xx xx xx];
  */
 &enet_mac {
+	/delete-property/ zephyr,random-mac-address;
 	nxp,unique-mac;
 };
 
@@ -252,4 +299,33 @@
 			reg = <0x001F0000 DT_SIZE_K(64)>;
 		};
 	};
+};
+
+/* ── USB1 HOST (EHCI High-Speed) — FT2232 #1 (센서) ────────────────
+ * CON201(Molex 67298-4090) USB1 포트 → FT2232 UART→O2-SM30-3V, H2S-SM30, CO-SM30, CH4-S3-3V, S300-S3-3V
+ */
+&usb1 {
+	compatible = "nxp,uhc-ehci";
+	phy-handle = <&usbphy1>;
+	/delete-property/ num-bidir-endpoints;
+	status = "okay";
+};
+
+&usbphy1 {
+	status = "okay";
+	tx-d-cal = <4>;
+	tx-cal-45-dp-ohms = <7>;
+	tx-cal-45-dm-ohms = <7>;
+};
+
+/* ── USB0 HOST (KHCI Full-Speed) — FT2232 #2 (AM1002 센서) ────────────
+ * CON201 USB0 포트 → FT2232 UART→AM1002 센서
+ * USB0 D+/D-는 전용 핀(별도 pinctrl 불필요)
+ * 클럭: board.c 에서 kCLK_48M_to_USB0 → 48MHz FRO_HF 공급
+ */
+&usb0 {
+	compatible = "nxp,uhc-khci";
+	/delete-property/ num-bidir-endpoints;
+	/delete-property/ no-voltage-regulator;
+	status = "okay";
 };

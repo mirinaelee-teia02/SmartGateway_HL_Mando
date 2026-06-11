@@ -223,6 +223,7 @@ static void set_active(netmgr_iface_t iface, const char *local_ip)
 	k_sem_give(&s_sem_ready);
 }
 
+
 static void clear_active(void)
 {
 	s_ready       = false;
@@ -302,6 +303,11 @@ static int eth_set_static_ip(struct net_if *iface)
 	net_if_ipv4_set_netmask_by_addr(iface, &addr, &mask);
 	net_if_ipv4_set_gw(iface, &gw);
 	net_if_set_default(iface);
+
+	/* 기본 라우터 등록: 외부 트래픽(DNS·인터넷)을 GW로 포워딩 */
+	if (!net_if_ipv4_router_add(iface, &gw, true, 0)) {
+		printf("[NETMGR] ETH router add failed\n");
+	}
 
 	printf("[NETMGR] ETH static IP OK: %s / %s  GW=%s\n",
 	       g_gw_config.eth_ip, g_gw_config.eth_netmask, g_gw_config.eth_gw);

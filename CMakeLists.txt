@@ -10,6 +10,18 @@ target_sources(app PRIVATE src/main.c src/adc.c src/udp.c src/msgpack_adc.c src/
 
 target_sources(app PRIVATE src/config_nvs.c src/network_manager.c src/dip_switch.c)
 
+if(CONFIG_SMARTGATEWAY_DI_DO_ENABLE)
+  target_sources(app PRIVATE src/di_do.c)
+endif()
+
+if(CONFIG_USB_HOST_STACK)
+  target_sources(app PRIVATE src/ftdi_usb.c src/gas_sensor.c)
+  # usbh_device.h (internal header) for usbh_device_get_any
+  zephyr_include_directories(
+    ${ZEPHYR_BASE}/subsys/usb/host
+  )
+endif()
+
 if(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
   target_sources(app PRIVATE src/wifi_manager.c)
 endif()
