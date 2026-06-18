@@ -105,7 +105,7 @@ static void netmgr_wifi_reset_assert(void)
 }
 
 #define NETMGR_STACK       7168
-#define NETMGR_PRIORITY    5
+#define NETMGR_PRIORITY    4
 
 #define WIFI_MAX_RETRIES   3
 #define WIFI_CONNECT_TO_MS 30000
@@ -208,9 +208,40 @@ uint16_t netmgr_udp_peer_port(void)
 	return 0U;
 }
 
-/* tcp_gateway.c 호출 인터페이스 유지 — 기능 없음 */
-void netmgr_notify_tcp_connect_fail(void) {}
-void netmgr_notify_tcp_connect_ok(void)   {}
+/* TCP 연속 실패 N회 → WiFi 강제 재연결 유도
+ * wifi_force_disconnect()는 net_mgmt()를 호출하므로 TCP 태스크(2048B 스택)에서
+ * 직접 호출하면 스택 오버플로우 발생. 플래그만 세우고 netmgr 태스크(7168B)가 처리. */
+#define TCP_FAIL_LIMIT  5
+static atomic_t s_tcp_fail_count;
+static atomic_t s_force_wifi_reconnect;
+
+void netmgr_notify_tcp_connect_fail(void)
+{
+	int n = (int)atomic_inc(&s_tcp_fail_count) + 1;
+
+	printf("[NETMGR] TCP connect fail #%d\n", n);
+#if IS_ENABLED(CONFIG_SMARTGATEWAY_WIFI_ENABLE)
+	if (n >= TCP_FAIL_LIMIT && s_active == NETMGR_IFACE_WIFI) {
+		atomic_set(&s_tcp_fail_count, 0);
+		if (wifi_is_ready()) {
+			/* WiFi LOWER_UP + IP 정상 → TCP 서버가 다운된 것
+			 * WiFi 재연결 불필요 — TCP 재시도 유지 */
+			printf("[NETMGR] TCP fail #%d — WiFi OK → server unreachable, keep retrying TCP\n", n);
+		} else {
+			/* WiFi 링크 자체가 끊김 → 재연결 필요 */
+			printf("[NETMGR] TCP fail limit (%d) + WiFi lost → schedule WiFi reconnect\n",
+			       TCP_FAIL_LIMIT);
+			atomic_set(&s_force_wifi_reconnect, 1);
+		}
+	}
+#endif
+}
+
+void netmgr_notify_tcp_connect_ok(void)
+{
+	atomic_set(&s_tcp_fail_count, 0);
+	atomic_set(&s_force_wifi_reconnect, 0);
+}
 
 /* ── 내부 상태 전환 ────────────────────────────────────────────── */
 
@@ -410,6 +441,10 @@ static void wifi_connected_service_loop(void)
 	}
 
 	while (wifi_is_ready()) {
+		if (atomic_cas(&s_force_wifi_reconnect, 1, 0)) {
+			printf("[NETMGR] WiFi reconnect requested by TCP fail → disconnect\n");
+			break;
+		}
 		k_sleep(K_SECONDS(1));
 	}
 	printf("[NETMGR] WiFi lost -> retry next cycle\n");

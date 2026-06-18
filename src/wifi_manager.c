@@ -22,7 +22,7 @@
 LOG_MODULE_REGISTER(wifi_mgr, LOG_LEVEL_INF);
 
 #define WIFI_STACK_SIZE   4096
-#define WIFI_PRIORITY     5
+#define WIFI_PRIORITY     4
 
 #define CONNECT_TIMEOUT_S 30
 
@@ -104,9 +104,16 @@ static int wifi_set_static_ip(struct net_if *iface)
 	net_if_ipv4_set_gw(iface, &gw);
 	net_if_set_default(iface);
 
-	/* 기본 라우터 등록: 외부 트래픽(DNS·인터넷)을 GW로 포워딩 */
-	if (!net_if_ipv4_router_add(iface, &gw, true, 0)) {
-		LOG_ERR("WiFi router add failed");
+	/* 기본 라우터 등록: 재연결 시 기존 엔트리 제거 후 추가 (중복 방지) */
+	{
+		struct net_if_router *old = net_if_ipv4_router_lookup(iface, &gw);
+
+		if (old) {
+			net_if_ipv4_router_rm(old);
+		}
+		if (!net_if_ipv4_router_add(iface, &gw, true, 0)) {
+			LOG_ERR("WiFi router add failed");
+		}
 	}
 
 	LOG_INF("WiFi static IP %s / %s gw %s",
@@ -172,10 +179,13 @@ int wifi_connect_once(int timeout_ms)
 bool wifi_is_ready(void)
 {
 	struct net_if *iface = net_if_get_first_wifi();
-	struct in_addr      want;
-	struct net_if        *found = iface;
+	struct in_addr want;
+	struct net_if *found = iface;
 
-	if (!iface || !net_if_is_up(iface)) {
+	/* admin_up + LOWER_UP(PHY carrier) 모두 확인: WPA scan 실패로 링크가
+	 * 끊겼으나 IP가 아직 남아 있는 경우에도 false 반환 */
+	if (!iface || !net_if_is_up(iface) ||
+	    !net_if_flag_is_set(iface, NET_IF_LOWER_UP)) {
 		return false;
 	}
 	if (net_addr_pton(AF_INET, g_gw_config.wifi_ip, &want) != 0) {

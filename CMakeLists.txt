@@ -6,6 +6,12 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(SmartGateway)
 
+# USB HOST 스택 활성 시 링커가 __rom_start_address 심볼을 요구하나
+# Zephyr 빌드 시스템이 defsym을 제공하지 않아 명시적으로 정의
+if(CONFIG_USB_HOST_STACK)
+  zephyr_ld_options(-Wl,--defsym=__rom_start_address=0x10000000)
+endif()
+
 target_sources(app PRIVATE src/main.c src/adc.c src/udp.c src/msgpack_adc.c src/time_helper.c src/rs232.c src/tcp_gateway.c src/sync_gate.c src/gw_error.c)
 
 target_sources(app PRIVATE src/config_nvs.c src/network_manager.c src/dip_switch.c)

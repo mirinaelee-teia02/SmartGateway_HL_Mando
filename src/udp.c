@@ -279,7 +279,7 @@ int udp_task_start(void)
 {
 	k_tid_t tid = k_thread_create(&udp_task_data, udp_task_stack,
 				      K_THREAD_STACK_SIZEOF(udp_task_stack),
-				      udp_task, NULL, NULL, NULL, 4, 0, K_NO_WAIT);
+				      udp_task, NULL, NULL, NULL, 3, 0, K_NO_WAIT);
 	/* tid: udp_task 스레드 핸들; NULL이면 생성 실패 */
 
 	if (tid == NULL) {

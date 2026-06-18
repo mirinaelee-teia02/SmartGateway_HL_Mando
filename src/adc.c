@@ -319,7 +319,7 @@ int adc_task_start(void)
 {
 	k_tid_t tid = k_thread_create(&adc_task_data, adc_task_stack,
 				      K_THREAD_STACK_SIZEOF(adc_task_stack),
-				      adc_task, NULL, NULL, NULL, 3, 0, K_NO_WAIT);
+				      adc_task, NULL, NULL, NULL, 0, 0, K_NO_WAIT);
 
 	if (tid == NULL) {
 		return -1;

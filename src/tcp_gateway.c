@@ -168,11 +168,15 @@ static void gw_init_connect_body_once(void)
 /* dir_tag: 로그 방향 레이블. p: 덤프 시작. n: 덤프 바이트 수 */
 static void gw_hex_line(const char *dir_tag, const uint8_t *p, size_t n)
 {
-	printf("[GW] %s %u B:", dir_tag, (unsigned)n);
-	for (size_t i = 0; i < n; i++) { /* i: 출력 중인 바이트 인덱스 */
+	/* 양산 로그 절감: Modbus RX / SmartGateway->Server / <-Server 출력 비활성 */
+	ARG_UNUSED(dir_tag);
+	ARG_UNUSED(p);
+	ARG_UNUSED(n);
+	/* printf("[GW] %s %u B:", dir_tag, (unsigned)n);
+	for (size_t i = 0; i < n; i++) {
 		printf(" %02x", p[i]);
 	}
-	printf("\n");
+	printf("\n"); */
 }
 
 /**
@@ -806,10 +810,10 @@ static void tcp_gateway_task(void *a, void *b, void *c)
 
 int tcp_gateway_task_start(void)
 {
-	/* prio 6: RS-232 Modbus txrx는 블로킹 — ADC(3)·UDP(4)보다 낮게 */
+	/* prio 5: RS-232 Modbus txrx는 블로킹 — ADC(0)·UDP(3)보다 낮게 */
 	k_tid_t t = k_thread_create(&tcp_gw_thr, tcp_gw_stack,
 				    K_THREAD_STACK_SIZEOF(tcp_gw_stack), tcp_gateway_task, NULL,
-				    NULL, NULL, 6, 0, K_NO_WAIT);
+				    NULL, NULL, 5, 0, K_NO_WAIT);
 
 	if (t == NULL) {
 		return -1;

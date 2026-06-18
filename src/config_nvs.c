@@ -620,7 +620,7 @@ static void print_config(void)
 		uint8_t dov = do_get();
 
 		(void)di_read(&di);
-		printf(" D) DI/DO Test\r\n");
+		printf(" J) DI/DO Test\r\n");
 		printf("    DI=0x%02X [", di);
 		for (int i = 0; i <= 7; i++) {
 			printf("%d", (di >> i) & 1);
@@ -740,7 +740,7 @@ static bool cfg_menu_letter_loop(void)
 			continue;
 		}
 #ifdef CONFIG_SMARTGATEWAY_DI_DO_ENABLE
-		if (sel == 'D') {
+		if (sel == 'J') {
 			/* DI/DO 서브 메뉴 */
 			for (;;) {
 				uint8_t di  = 0;
